@@ -58,12 +58,21 @@ def loadCam(args, id, cam_info, resolution_scale, scene_scale, camera_lr):
     # save_image(torch.from_numpy(cam_info.image).permute([2, 0, 1]) / 255, 'test/test.png')
     # exit()
 
-
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, prcppoint=cam_info.prcppoint,
-                  image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device,
-                  mask=resized_mask, mono=resized_mono, scene_scale=scene_scale, camera_lr=camera_lr)
+    return Camera(colmap_id=cam_info.uid,
+                  R=cam_info.R, 
+                  T=cam_info.T, 
+                  FoVx=cam_info.FovX,
+                  FoVy=cam_info.FovY, 
+                  prcppoint=cam_info.prcppoint,
+                  image=gt_image, 
+                  gt_alpha_mask=loaded_mask,
+                  image_name=cam_info.image_name, 
+                  uid=id, 
+                  data_device=args.data_device,
+                  mask=resized_mask, 
+                  mono=resized_mono, 
+                  scene_scale=scene_scale, 
+                  camera_lr=camera_lr)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, scene_scale, camera_lr, args):
     camera_list = []

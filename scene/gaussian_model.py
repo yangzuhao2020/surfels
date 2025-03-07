@@ -11,7 +11,7 @@
 
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, normal2rotation
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, normal2rotation, compute_normals_cross_product
 from torch import nn
 import os
 from torch.utils.cpp_extension import load
@@ -43,7 +43,7 @@ class GaussianModel:
 
     def __init__(self, args):
         self.active_sh_degree = 0
-        self.max_sh_degree = args.sh_degree  
+        self.max_sh_degree = 0 
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -146,74 +146,108 @@ class GaussianModel:
         return quaternion2rotmatrix(self.get_rotation)[..., 2]
 
 
-    def oneupSHdegree(self):
-        if self.active_sh_degree < self.max_sh_degree:
-            self.active_sh_degree += 1
-
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
+    # def oneupSHdegree(self):
+    #     if self.active_sh_degree < self.max_sh_degree:
+    #         self.active_sh_degree += 1
+    
+    def create_pcd(self, color, depth, intrinsics, w2c, mask=None):
+        """ color 的形状 (C,H,W) depth (1,H,W) mask (H,W) """   
+    # def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         # 从点云中初始化，设置好初始的各个参数情况。设置梯度追踪。
-        self.spatial_lr_scale = spatial_lr_scale
+        # self.spatial_lr_scale = spatial_lr_scale
 
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        # fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        # fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
 
-        print("Number of points at initialisation : ", fused_point_cloud.shape[0], "Shape of points at initialisation : ",fused_point_cloud.shape)
+        # print("Number of points at initialisation : ", fused_point_cloud.shape[0], "Shape of points at initialisation : ",fused_point_cloud.shape)
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        # 将点云坐标转换为 PyTorch 张量 限制输出的值最小为 0.0000001 返回 每个点的 KNN 平均距离。
-        scales = torch.log(torch.sqrt(dist2 / 4))[...,None].repeat(1, 3)
-        # scales 是一个 形状为 [N, 3] 的张量, 用于缩放点云的 x, y, z 坐标, 也同时可以表达密度。
-        # scales = torch.log(torch.ones((len(fused_point_cloud), 3)).cuda() * 0.02)
+        # dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        # # 将点云坐标转换为 PyTorch 张量 限制输出的值最小为 0.0000001 返回 每个点的 KNN 平均距离。
+        # scales = torch.log(torch.sqrt(dist2 / 4))[...,None].repeat(1, 3)
+        # # scales 是一个 形状为 [N, 3] 的张量, 用于缩放点云的 x, y, z 坐标, 也同时可以表达密度。
+        # # scales = torch.log(torch.ones((len(fused_point_cloud), 3)).cuda() * 0.02)
         
-        if self.config[0] > 0:
-            if np.abs(np.sum(pcd.normals)) < 1: # 判断是否绝对值是否小于 1。
-                dup = 4
-                fused_point_cloud = torch.cat([fused_point_cloud for _ in range(dup)], 0)
-                # 复制点云数据 4 份
-                fused_color = torch.cat([fused_color for _ in range(dup)], 0)
-                # 复制颜色 4 份
-                scales = torch.cat([scales for _ in range(dup)], 0)
-                # 复制尺度因子 4 份
-                normals = np.random.rand(len(fused_point_cloud), 3) - 0.5
-                # 随机生成法向量。范围在 [-0.5,0.5]
-                normals /= np.linalg.norm(normals, 2, 1, True)
-                # 归一化。
-            else:
-                normals = pcd.normals
+        # if self.config[0] > 0:
+        #     if np.abs(np.sum(pcd.normals)) < 1: # 判断是否绝对值是否小于 1。
+        #         dup = 4
+        #         fused_point_cloud = torch.cat([fused_point_cloud for _ in range(dup)], 0)
+        #         # 复制点云数据 4 份
+        #         fused_color = torch.cat([fused_color for _ in range(dup)], 0)
+        #         # 复制颜色 4 份
+        #         scales = torch.cat([scales for _ in range(dup)], 0)
+        #         # 复制尺度因子 4 份
+        #         normals = np.random.rand(len(fused_point_cloud), 3) - 0.5
+        #         # 随机生成法向量。范围在 [-0.5,0.5]
+        #         normals /= np.linalg.norm(normals, 2, 1, True)
+        #         # 归一化。
+        #     else:
+        #         normals = pcd.normals
 
-            rots = normal2rotation(torch.from_numpy(normals).to(torch.float32)).to("cuda")
-            scales[..., -1] -= 1e10 # squeeze z scaling
+        #     rots = normal2rotation(torch.from_numpy(normals).to(torch.float32)).to("cuda")
+        #     scales[..., -1] -= 1e10 # squeeze z scaling
             # 抑制Z方向的缩放。
             
-            # scales[..., -1] = 0
-            # print(pcd.normals)
-            # exit()
-            # rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
-            # rots = self.rotation_activation(rots)
-        else:
-            rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-            rots[:, 0] = 1
+        #     # scales[..., -1] = 0
+        #     # print(pcd.normals)
+        #     # exit()
+        #     # rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+        #     # rots = self.rotation_activation(rots)
+        # else:
+        #     rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        #     rots[:, 0] = 1
+        width, height = color.shape[2], color.shape[1]
+        CX = intrinsics[0][2]  # 主点 x 坐标
+        CY = intrinsics[1][2]  # 主点 y 坐标
+        FX = intrinsics[0][0]  # 焦距 x
+        FY = intrinsics[1][1]  # 焦距 y
 
+        x_grid, y_grid = torch.meshgrid(torch.arange(width).cuda().float(),
+                                        torch.arange(height).cuda().float(),
+                                        indexing='xy')
+        xx = (x_grid - CX)/FX
+        yy = (y_grid - CY)/FY
+        xx = xx.reshape(-1)
+        yy = yy.reshape(-1)
+        depth_z = depth[0].reshape(-1)
+
+        pts_cam = torch.stack((xx * depth_z, yy * depth_z, depth_z), dim=-1)
+        pix_ones = torch.ones(height * width, 1).cuda().float()
+        pts4 = torch.cat((pts_cam, pix_ones), dim=1)  # (X, Y, Z, 1)
+        c2w = torch.inverse(w2c)  # 计算世界坐标变换矩阵
+        pts = (c2w @ pts4.T).T[:, :3].to("cuda")  # 从相机坐标变换到世界坐标 (H * W, 3)
+
+        scale_gs = depth_z / ((FX + FY)/2)
+        scales = scale_gs.square().unsqueeze(-1).repeat(1, 3).to("cuda")  # (H * W, 3)
+        col = color.transpose(0, 1, 2).reshape(-1, 3).to("cuda")
         
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+         # Select points based on mask
+        if mask is not None:
+            mask = mask.reshape(-1).bool().to("cuda")  # 确保 mask 形状正确
+            col = col[mask]
+            pts = pts[mask]
+            scales = scales[mask]
+            
+        normals = compute_normals_cross_product(pts, width, height)
+        rots = normal2rotation(torch.from_numpy(normals).to(torch.float32)).to("cuda")
+        scales[..., -1] -= 1e10 # squeeze z scaling
+        # features = torch.zeros((pts.shape[0], 3)).float().cuda()
         # features 张量大小 (n,3,(max_sh_degree + 1)^2) 3表示RGB 用于颜色表示。
-        features[:, :3, 0 ] = fused_color
-        features[:, 3:, 1:] = 0.0
+        # features[:, :3, 0 ] = fused_color
+        # features[:, 3:, 1:] = 0.0
         # 球谐0阶系数，其值设置为RGB的颜色，其他球谐分量设置为0。
-        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = inverse_sigmoid(0.1 * torch.ones((pts.shape[0], 1), dtype=torch.float, device="cuda"))
         # 初始化透明度。
 
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        # 存储球谐0阶，同时改变维度顺序。(N, 1, 3)
-        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
-        # 存储 剩下的球谐分量（SH1 以上），形状调整同上。
+        self._xyz = nn.Parameter(pts.requires_grad_(True))
+        self._features_dc = nn.Parameter(col.requires_grad_(True))
+        # 存储球谐0阶，同时改变维度顺序。(N, 3)
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         # 每个点的最大投影半径（2D 视角下），初始化为 0。
         # exit()
+
 
     def training_setup(self, training_args):
         # 对模型梯度累积进行初始化、优化器设置以及学习率调度器配置。
@@ -287,66 +321,46 @@ class GaussianModel:
     #     v = self.get_xyz
     #     n = self.get_normal
     #     c = SH2RGB(self._features_dc)[:, 0]
-    #     save_pcl('test/pcl.ply', v, n, c)
+    #     save_pcl('test/pcl.ply', v, n, c)  
+    def initialize_first_timestep(self, dataset, total_num_frames, scene_radius_depth_ratio):
+        """ 
+        初始化第一帧的 RGB-D 数据、
+        初始化相机参数和变换矩阵，
+        加载更高分辨率的 Densification 数据
+        生成初始 3D 点云
+        初始化神经表示的优化参数
+        估算场景的尺度
+        """
+        # Get RGB-D Data & Camera Parameters
+        gt_rgb, gt_depth, intrinsics, gt_pose = dataset[0]
+
+        # Process RGB-D Data
+        gt_rgb = gt_rgb.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        gt_depth = gt_depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
         
-        
+        # Process Camera Parameters
+        intrinsics = intrinsics[:3, :3] # 得到相机内参
+        gt_w2c = torch.linalg.inv(gt_pose) # 得到相机位姿 (世界坐标系到相机坐标系)
 
-    def reset_opacity(self, ratio, iteration):
-        # if len(self._xyz) < self.opac_reset_record[0] * 1.05 and iteration < self.opac_reset_record[1] + 3000:
-        #     print(len(self._xyz), self.opac_reset_record, 'notreset')
-        #     return
-        # print(len(self._xyz), self.opac_reset_record, 'reset')
-        # self.opac_reset_record = [len(self._xyz), iteration]
+        # Setup Camera 对象
+        w = gt_rgb.shape[2]
+        h = gt_rgb.shape[1]
+        cam = setup_camera(w, h, intrinsics.cpu().numpy(), gt_w2c.detach().cpu().numpy())
 
-        # opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * ratio))
-        opacities_new = inverse_sigmoid(self.get_opacity * ratio)
-        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
-        self._opacity = optimizable_tensors["opacity"]
+        # Get Initial Point Cloud (PyTorch CUDA Tensor)
+        mask = (gt_depth > 0) & energy_mask(gt_rgb) # Mask out invalid depth values
+        # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
+        mask = mask.reshape(-1)
+        self.create_pcd(gt_rgb, gt_depth, gt_w2c, intrinsics, mask)
 
-    
+        # Initialize cams
+        variables = self.initialize_cams(total_num_frames)
 
-    def load_ply(self, path):
-        plydata = PlyData.read(path)
+        # Initialize an estimate of scene radius for Gaussian-Splatting Densification
+        variables['scene_radius'] = torch.max(gt_depth)/scene_radius_depth_ratio # NOTE: change_here
 
-        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
-                        np.asarray(plydata.elements[0]["y"]),
-                        np.asarray(plydata.elements[0]["z"])),  axis=1)
-        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        return variables, intrinsics, gt_w2c, cam
 
-        features_dc = np.zeros((xyz.shape[0], 3, 1))
-        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
-        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
-        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
-
-        extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
-        extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
-        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
-        for idx, attr_name in enumerate(extra_f_names):
-            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
-        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
-        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
-
-        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
-        scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
-        scales = np.zeros((xyz.shape[0], len(scale_names)))
-        for idx, attr_name in enumerate(scale_names):
-            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
-
-        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
-        rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
-        rots = np.zeros((xyz.shape[0], len(rot_names)))
-        for idx, attr_name in enumerate(rot_names):
-            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
-
-        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
-        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
-
-        self.active_sh_degree = self.max_sh_degree
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

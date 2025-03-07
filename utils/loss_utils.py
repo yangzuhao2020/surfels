@@ -17,9 +17,10 @@ from math import exp
 from utils.general_utils import knn_pcl
 # from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import knn_points
+from tqdm import tqdm
 
-def l1_loss(network_output, gt, weight=1):
-    return torch.abs((network_output - gt) * weight).mean()
+def l1_loss(render_image, gt, weight=1):
+    return torch.abs((render_image - gt) * weight).mean()
 
 def cos_loss(output, gt, thrsh=0, weight=1):
     cos = torch.sum(output * gt * weight, 0)
@@ -85,3 +86,48 @@ def knn_smooth_loss(gaussian, K):
     nn_normal = torch.nn.functional.normalize(nn_normal)
     loss_normal = cos_loss(normal, nn_normal, thrsh=np.pi / 3)
     return loss_prj, loss_normal
+
+def compute_depth_loss(render_depth, gt_depth, mask, tracking=True):
+    """ 计算深度损失（Tracking: sum, Mapping: mean）"""
+    mask = mask.detach()  # 避免梯度影响
+    loss = torch.abs(gt_depth - render_depth)[mask]
+    return loss.sum() if tracking else loss.mean()
+
+
+def compute_rgb_loss(gt_image, render_depth, mask, tracking, use_sil_for_loss, ignore_outlier_depth_loss):
+    """
+    计算 RGB 颜色损失：
+    - Tracking 阶段：使用 `L1 Loss`，可选 `mask` 过滤前景区域。
+    - Mapping 阶段：使用 `0.8 * L1 + 0.2 * SSIM` 作为颜色损失。
+    """
+    if tracking:
+        # 仅 Tracking 阶段可能使用 mask 过滤
+        if use_sil_for_loss or ignore_outlier_depth_loss:
+            color_mask = torch.tile(mask, (3, 1, 1)).detach()  # 扩展 Mask 适用于 RGB
+            return torch.abs(render_depth - gt_image)[color_mask].sum()
+        return torch.abs(render_depth - gt_image).sum()
+
+    # Mapping 阶段，使用 L1 + SSIM
+    return 0.8 * l1_loss(gt_image, render_depth) + 0.2 * (1.0 - ssim(gt_image, render_depth))
+
+
+def should_continue_tracking(iter, num_iters_tracking, losses_depth, config, do_continue_slam, progress_bar, time_idx):
+    """ 判断 Tracking 是否应该继续优化 """
+    # 检查是否达到最大迭代次数
+    if iter == num_iters_tracking:
+        # 1️⃣ 如果深度误差足够小，提前终止
+        if losses_depth < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
+            return False, iter, num_iters_tracking, do_continue_slam, progress_bar
+
+        # 2️⃣ 启用 do_continue_slam，扩展 Tracking 迭代次数
+        elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
+            do_continue_slam = True
+            progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            num_iters_tracking = 2 * num_iters_tracking  # 扩展迭代次数
+            return True, iter, num_iters_tracking, do_continue_slam, progress_bar
+
+        # 3️⃣ 否则直接终止 Tracking
+        else:
+            return False, iter, num_iters_tracking, do_continue_slam, progress_bar
+
+    return True, iter, num_iters_tracking, do_continue_slam, progress_bar

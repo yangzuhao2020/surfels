@@ -158,15 +158,12 @@ class Camera(nn.Module):
         return self.mask#.to(torch.bool)
 
     def get_gtImage(self, bg, with_mask=True, mask_overwrite=None):
-        # print(self.original_image.dtype, self.mask.dtype, self.mask.mean())
-        # test = self.original_image * self.mask + bg[:, None, None] * (1 - self.mask)
-        # print(test.dtype)
+        """# 没有掩码，直接返回原始图像。有掩码，返回掩码图像"""
         if self.mask is None or not with_mask:
             return self.original_image
-        # exit()
         mask = self.get_gtMask(with_mask) if mask_overwrite is None else mask_overwrite
         return self.original_image * mask + bg[:, None, None] * (1 - mask)
-    
+        
     def random_patch(self, h_size=float('inf'), w_size=float('inf')):
         h = self.image_height
         w = self.image_width

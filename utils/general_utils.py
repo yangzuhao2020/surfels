@@ -19,6 +19,7 @@ import pymeshlab
 from pytorch3d.structures import Pointclouds, Meshes
 from pytorch3d.io import IO
 from plyfile import PlyData, PlyElement
+import torch.nn.functional as F
 from tqdm import tqdm
 
 def cutoff_act(x, low=0.1, high=12):
@@ -175,6 +176,26 @@ def normal2rotation(n):
     # exit()
     return q
 # 将法向量旋转到特定方向的矩阵。
+
+
+def compute_normals_cross_product(self, pts, width, height):
+    """ 通过 3D 叉乘计算法线 同时归一化"""
+    pts = pts.view(height, width, 3)  # 变成图像形状 (H, W, 3)
+
+    # 计算相邻像素的 3D 坐标差分
+    v1 = pts[1:, :-1, :] - pts[:-1, :-1, :]  # y 方向的梯度
+    v2 = pts[:-1, 1:, :] - pts[:-1, :-1, :]  # x 方向的梯度
+
+    # 计算叉乘得到法线
+    normals = torch.cross(v1, v2, dim=-1)
+    normals = F.normalize(normals, dim=-1)  # 归一化
+
+    # 填充边界（因为叉乘少了一行一列）
+    padded_normals = torch.zeros((height, width, 3), device=pts.device)
+    padded_normals[:-1, :-1, :] = normals  # 复制有效区域
+
+    return padded_normals.reshape(-1, 3)  # 变回 (N, 3)
+
 
 def quaternion2rotmatrix(q):
     r, x, y, z = q.split(1, -1)
