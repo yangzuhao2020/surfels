@@ -18,7 +18,7 @@ from utils.image_utils import resize_image
 import torch.nn.functional as F
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, scene_scale, camera_lr):
+def loadCam(args, id, cam_info, resolution_scale, scene_scale=1.0):
     orig_w, orig_h = cam_info.image.size
     if args.resolution == 1:
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
@@ -62,12 +62,11 @@ def loadCam(args, id, cam_info, resolution_scale, scene_scale, camera_lr):
                   data_device=args.data_device,
                   mask=resized_mask, 
                   mono=resized_mono, 
-                  scene_scale=scene_scale, 
-                  camera_lr=camera_lr)
+                  scene_scale=scene_scale)
     
 
-def cameraList_from_camInfos(cameras, resolution_scale, cameras_extent, camera_lr, args, time_idx, camlist):
-    camlist[resolution_scale].append(loadCam(args, time_idx, cameras, resolution_scale, cameras_extent, camera_lr))
+def cameraList_from_camInfos(cameras, resolution_scale, args, time_idx, camlist):
+    camlist[resolution_scale].append(loadCam(args, time_idx, cameras, resolution_scale))
     if time_idx > 0:
         initialize_camera_pose(camlist[resolution_scale], time_idx)
     return camlist[resolution_scale]

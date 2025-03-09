@@ -23,7 +23,7 @@ import numpy as np
 
 
 class Scene:
-    def __init__(self, args:ModelParams, gaussians:GaussianModel, camera_lr: float=0.0, resolution_scales=1):
+    def __init__(self, args:ModelParams, gaussians:GaussianModel, resolution_scales=1):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -31,7 +31,7 @@ class Scene:
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
-        self.camera_lr = camera_lr
+        # self.camera_lr = camera_lr
         # if load_iteration:
         #     if load_iteration == -1:
         #         self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
@@ -78,14 +78,12 @@ class Scene:
         if gaussians is None:
             print("No Gaussian model provided!!!!")
             return
-        self.gaussians.config.append(camera_lr > 0)
+        # self.gaussians.config.append(camera_lr > 0)
         self.gaussians.config = torch.tensor(self.gaussians.config, dtype=torch.float32, device="cuda")
 
     def add_cameras(self, cameras, time_idx, resolution_scale=1.0):
         self.camlist[resolution_scale] = cameraList_from_camInfos(cameras, 
                                                                   resolution_scale,
-                                                                  self.cameras_extent, 
-                                                                  self.camera_lr, 
                                                                   self.args, 
                                                                   time_idx, 
                                                                   self.camlist)

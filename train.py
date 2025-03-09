@@ -32,7 +32,7 @@ from scene.c3vd import C3VDDataset
 from scene.cameras import Camera
 from arguments.configs import *
 from utils.image_utils import energy_mask
-
+from arguments.c3vd.c3vd_base import config
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -41,43 +41,24 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
-def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoint, debug_from,config):
-    first_iter = 0
-    tb_writer = prepare_output_and_logger(args)
+def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_from, dataset):
+    # first_iter = 0
+    # tb_writer = prepare_output_and_logger(args)
     gaussians = GaussianModel(args)
-    config = setup_config_defaults(config)
-    output_dir, eval_dir = setup_directories(config) # 实验结果输出文件。
-    dataset_config = config["data"]
-    dataset_config, gradslam_data_cfg = setup_dataset_config(dataset_config)
-    
-    dataset = C3VDDataset(
-        config_dict=gradslam_data_cfg,  # 数据集的配置字典
-        basedir=dataset_config["basedir"],  # 数据集的基本目录
-        sequence=os.path.basename(dataset_config["sequence"]),  # 数据序列的名称
-        start=dataset_config["start"],  # 开始的帧索引
-        end=dataset_config["end"],  # 结束的帧索引
-        stride=dataset_config["stride"],  # 采样步长（跳过的帧数）
-        desired_height=dataset_config["desired_image_height"],  # 目标图像高度
-        desired_width=dataset_config["desired_image_width"],  # 目标图像宽度
-        device="cuda",  # 运行设备（如 CPU 或 GPU）
-        relative_pose=True,  # 让位姿相对于第一帧
-        ignore_bad=dataset_config["ignore_bad"],  # 是否忽略损坏的帧
-        use_train_split=dataset_config["use_train_split"],  # 是否使用训练集划分
-        train_or_test=dataset_config["train_or_test"]  # 选择训练模式或测试模式
-    )
-    use_mask = args.use_mask
-    scene = Scene(args, gaussians, opt.camera_lr)
-    if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
-    elif use_mask: # visual hull init
-        gaussians.mask_prune(scene.getCameras(), 4) # 掩码剪枝
-        None
 
-    opt.densification_interval = max(opt.densification_interval, len(scene.getCameras()))
+    # use_mask = args.use_mask
+    scene = Scene(args, gaussians)
+    # if checkpoint:
+    #     (model_params, first_iter) = torch.load(checkpoint)
+    #     gaussians.restore(model_params, opt)
+    # elif use_mask: # visual hull init
+    #     gaussians.mask_prune(scene.getCameras(), 4) # 掩码剪枝
+    #     None
+    total_num_frames = len(dataset) 
+    opt.densification_interval = max(opt.densification_interval, total_num_frames)
     # 调整密度的周期。
-    background = torch.tensor([1, 1, 1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
-    background = torch.rand((3), dtype=torch.float32, device="cuda") if args.random_background else background
+    background = torch.tensor([1, 1, 1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda") # 黑色背景
+    # background = torch.rand((3), dtype=torch.float32, device="cuda") if args.random_background else background
     patch_size = [float('inf'), float('inf')] # 设置两个无穷大的元素。
     
     iter_start = torch.cuda.Event(enable_timing = True)
@@ -89,9 +70,6 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
     ema_loss_for_log = 0.0
 
     checkpoint_time_idx = 0
-    total_num_frames = None
-    config = {}
-    curr_data = {}
     keyframe_list = []
     gt_w2c_all_frames = []
     actural_keyframe_ids = []
@@ -103,12 +81,16 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
     FoVx = 2 * np.arctan(w / (2 * fx)) 
     FoVy = 2 * np.arctan(h / (2 * fy))
     prcppoint = np.array([cx / w, cy / h])
+    num_iters_tracking_cam = config['tracking']['num_iters'] # 相机优化的次数。
+    num_iters_mapping = config['mapping']['num_iters'] # 高斯点的优化，每帧优化的次数。
+    
     
     for time_idx in tqdm(range(checkpoint_time_idx, total_num_frames)):
-        gt_rgb, gt_depth, intrinsics, gt_pose = dataset[time_idx]
+        gt_rgb, gt_depth, k, gt_pose = dataset[time_idx]
         gt_w2c = torch.linalg.inv(gt_pose)
+        curr_data = {"image":gt_rgb, "depth":gt_depth, "pose":gt_w2c}
         mask = (gt_depth > 0) & energy_mask(gt_rgb)
-        gaussians.create_pcd(gt_rgb, gt_depth,intrinsics,mask)
+        gaussians.create_pcd(gt_rgb, gt_depth, k, mask)
         
         cam = Camera(
             colmap_id=time_idx,
@@ -120,7 +102,6 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
             image=gt_rgb,
             data_device = "cuda",
             uid=time_idx,
-            camera_lr=1e-4,
         )
         cam.mono = depth2normal(gt_depth, mask, cam) # [3, H, W]
         
@@ -128,22 +109,22 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
         iter_start.record()
         gt_rgb = gt_rgb.permute(2, 0, 1) / 255
         gt_depth = gt_depth.permute(2, 0, 1)
-        # Pick a random Camera
+        
         if not viewpoint_stack:
             viewpoint_stack = scene.getCameras().copy()[:]
-        viewpoint_cam = viewpoint_stack[time_idx]
+        viewpoint_cam:Camera = viewpoint_stack[time_idx]
 
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             tracking = True
             # gaussians.initialize_optimizer(config['tracking']['lrs'], mode="tracking")
             # Keep Track of Best Candidate Rotation & Translation
             gaussians.training_setup(opt, tracking) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
-            gaussians.update_learning_rate(time_idx) # 传入迭代次数，修改位置参数的学习率。
+            gaussians.update_learning_rate(time_idx,tracking) # 传入迭代次数，修改位置参数的学习率。
+            
+            viewpoint_cam.update_learning_rate()
             candidate_cam_unnorm_rot = viewpoint_cam.q.detach().clone()
             candidate_cam_tran = viewpoint_cam.T.detach().clone()
             current_min_loss = float(1e20)
-            num_iters_tracking_cam = config['tracking']['num_iters'] # 相机优化的次数。
-            num_iters_mapping = config['mapping']['num_iters'] # 高斯点的优化，每帧优化的次数。
             progress_bar = tqdm(range(num_iters_tracking_cam), desc=f"Tracking Time Step: {time_idx}")
             iter = 0
             do_continue_slam = False
@@ -155,9 +136,9 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
                 render_image, render_normal, render_depth, render_opac, viewspace_point_tensor, visibility_filter, radii = \
                 render_pkg["render"], render_pkg["normal"], render_pkg["depth"], render_pkg["opac"], \
                 render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-                loss,loss_dict,mask_vis= get_loss(viewpoint_cam, gaussians, pipe, 
-                                                background, pool, tracking,
-                                                patch_size, curr_data, use_mask=True)
+                loss,loss_dict,mask_vis= get_loss(render_pkg, viewpoint_cam, 
+                                                  gaussians, pool, curr_data,
+                                                  mask, tracking=True)
                 loss.backward() # 反向传播。
                 iter_end.record()
                 gaussians.optimizer.step() # 更新参数
@@ -263,9 +244,9 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
             render_image, render_normal, render_depth, render_opac, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["normal"], render_pkg["depth"], render_pkg["opac"], \
             render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            loss,loss_dict,mask_vis= get_loss(viewpoint_cam, gaussians, pipe, 
-                                            background, pool, tracking,
-                                            patch_size, curr_data, use_mask=True)
+            loss,loss_dict,mask_vis= get_loss(render_pkg,viewpoint_cam, 
+                                              gaussians, pool, curr_data,
+                                              mask, tracking=False)
             loss.backward() # 反向传播。
             
             with torch.no_grad():
@@ -304,13 +285,13 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
                     print("\n[ITER {}] Saving Checkpoint".format(time_idx))
                     torch.save((gaussians.capture(), time_idx), scene.model_path + "/chkpnt" + str(time_idx) + ".pth")
 
-def get_loss(render_pkg, viewpoint_cam, gaussians, 
-             background, pool, tracking,
-             curr_data, use_mask=True):
+def get_loss(render_pkg, viewpoint_cam:Camera,
+             gaussians, pool, curr_data,
+             mask, tracking,use_mask=True):
     # loss_depth_normal
     mask_gt = viewpoint_cam.get_gtMask(use_mask) # (1, H, W) 全1的张量。
     # gt_image = viewpoint_cam.get_gtImage(background, use_mask)
-    mask_vis = (render_pkg["opac"].detach() > 1e-5)
+    mask_vis = (render_pkg["opac"].detach() > 1e-5) & mask.bool()
     # 确定哪些像素是背景，要求把不透明度很低的点找出来，那么它对应的区域说明是不存在物体。
     loss_mask = (render_pkg["opac"] * (1 - pool(mask_gt))).mean()
     # 为什么会出现池化这个操作，原因很简单，他想要扩大边界一点。
@@ -336,7 +317,11 @@ def get_loss(render_pkg, viewpoint_cam, gaussians,
     loss_opac = (torch.exp(-(opac_ - 0.5)**2 * 20) * opac_mask).mean()
 
     loss = loss_rgb + 0.1 * loss_mask +  0.01* loss_opac + loss_depth + loss_depth_normal * 0.1
-    loss_dict = {"loss_rgb": loss_rgb, "loss_mask": loss_mask, "loss_opac": loss_opac, "loss_depth": loss_depth, "loss_depth_normal": loss_depth_normal}
+    loss_dict = {"loss_rgb": loss_rgb, 
+                 "loss_mask": loss_mask, 
+                 "loss_opac": loss_opac, 
+                 "loss_depth": loss_depth, 
+                 "loss_depth_normal": loss_depth_normal}
     return loss, loss_dict, mask_vis
 
 def prepare_output_and_logger(args):
@@ -403,6 +388,26 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
 if __name__ == "__main__":
     # Set up command line argument parser
+    config = setup_config_defaults(config)
+    output_dir, eval_dir = setup_directories(config) # 实验结果输出文件。
+    dataset_config = config["data"]
+    dataset_config, gradslam_data_cfg = setup_dataset_config(dataset_config)
+    dataset = C3VDDataset(
+        config_dict=gradslam_data_cfg,  # 数据集的配置字典
+        basedir=dataset_config["basedir"],  # 数据集的基本目录
+        sequence=os.path.basename(dataset_config["sequence"]),  # 数据序列的名称
+        start=dataset_config["start"],  # 开始的帧索引
+        end=dataset_config["end"],  # 结束的帧索引
+        stride=dataset_config["stride"],  # 采样步长（跳过的帧数）
+        desired_height=dataset_config["desired_image_height"],  # 目标图像高度
+        desired_width=dataset_config["desired_image_width"],  # 目标图像宽度
+        device="cuda",  # 运行设备（如 CPU 或 GPU）
+        relative_pose=True,  # 让位姿相对于第一帧
+        ignore_bad=dataset_config["ignore_bad"],  # 是否忽略损坏的帧
+        use_train_split=dataset_config["use_train_split"],  # 是否使用训练集划分
+        train_or_test=dataset_config["train_or_test"]  # 选择训练模式或测试模式
+    )
+    
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
@@ -425,7 +430,10 @@ if __name__ == "__main__":
     lp_params = lp.extract(args)
     print("lp.extract(args): ", lp_params.__dict__)  # 打印对象内部所有属性和值
     
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), 
+             pp.extract(args), args.save_iterations, 
+             args.checkpoint_iterations, args.debug_from,
+             dataset)
 
     # All done
     print("\nTraining complete.")

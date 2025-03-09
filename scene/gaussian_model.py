@@ -151,7 +151,7 @@ class GaussianModel:
     #     if self.active_sh_degree < self.max_sh_degree:
     #         self.active_sh_degree += 1
     
-    def create_pcd(self, color, depth, intrinsics, w2c, mask=None):
+    def create_pcd(self, color, depth, k, w2c, mask=None):
         """ color 的形状 (C,H,W) depth (1,H,W) mask (H,W) """   
     # def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         # 从点云中初始化，设置好初始的各个参数情况。设置梯度追踪。
@@ -198,10 +198,10 @@ class GaussianModel:
         #     rots[:, 0] = 1
         
         width, height = color.shape[2], color.shape[1]
-        CX = intrinsics[0][2]  # 主点 x 坐标
-        CY = intrinsics[1][2]  # 主点 y 坐标
-        FX = intrinsics[0][0]  # 焦距 x
-        FY = intrinsics[1][1]  # 焦距 y
+        CX = k[0][2]  # 主点 x 坐标
+        CY = k[1][2]  # 主点 y 坐标
+        FX = k[0][0]  # 焦距 x
+        FY = k[1][1]  # 焦距 y
 
         x_grid, y_grid = torch.meshgrid(torch.arange(width).cuda().float(),
                                         torch.arange(height).cuda().float(),
@@ -279,13 +279,14 @@ class GaussianModel:
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init)
         # self.xyz_scheduler_args 这是一个函数，输入训练的实时步数，既可以得到位置的学习率。
 
-    def update_learning_rate(self, iteration):
+    def update_learning_rate(self, iteration, tracking = False):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
-                param_group['lr'] = lr
-                return lr
+                if tracking:
+                    param_group['lr'] = 0
+                param_group['lr'] = lr 
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']

@@ -6,7 +6,6 @@ from arguments.c3vd.c3vd_base import config
 dataset_config = config["data"]
 dataset_config, gradslam_data_cfg = setup_dataset_config(dataset_config)
 
-
 dataset = C3VDDataset(
         config_dict=gradslam_data_cfg,  # 数据集的配置字典
         basedir=dataset_config["basedir"],  # 数据集的基本目录

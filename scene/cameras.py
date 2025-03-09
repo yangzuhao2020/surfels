@@ -18,11 +18,16 @@ from utils.graphics_utils import getWorld2View, getWorld2View2, getProjectionMat
 from utils.general_utils import rotmatrix2quaternion
 
 class Camera(nn.Module):
-    def __init__(self, colmap_id, R, T, FoVx, FoVy, prcppoint,
+    def __init__(self, colmap_id, R, T, FoVx, FoVy, 
+                 prcppoint,
                  image=torch.zeros([1, 1, 1]), 
-                 gt_alpha_mask=None, image_name=None, uid=None,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 mask=None, mono=None, img_w=None, img_h=None, scene_scale=1, camera_lr=0):
+                 gt_alpha_mask=None, image_name=None, 
+                 uid=None,
+                 trans=np.array([0.0, 0.0, 0.0]), 
+                 scale=1.0, data_device = "cuda",
+                 mask=None, mono=None, img_w=None, 
+                 img_h=None, scene_scale=1, 
+                 camera_q_lr=0, camera_T_lr=0):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -61,15 +66,21 @@ class Camera(nn.Module):
         self.T = nn.Parameter(self.T.to(torch.float32).contiguous().requires_grad_(True))
         self.to(data_device)
 
-        self.lr = camera_lr
+        self.q_lr = camera_q_lr
+        self.T_lr = camera_T_lr
+        
         l = [
-            {'params': [self.q], 'lr': camera_lr * self.scene_scale},
-            {'params': [self.T], 'lr': camera_lr * self.scene_scale},
+            {'params': [self.q], 'lr': camera_q_lr, "name": "q"},
+            {'params': [self.T], 'lr': camera_T_lr, "name": "T"},
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
         self.prcppoint = torch.tensor(prcppoint).to(torch.float32)#.cuda()
-        self.projection_matrix = getProjectionMatrix(self.znear, self.zfar, FoVx, FoVy, self.image_width, self.image_height, prcppoint).transpose(0,1).to(data_device)
+        self.projection_matrix = getProjectionMatrix(self.znear, self.zfar,
+                                                     FoVx, FoVy, 
+                                                     self.image_width, 
+                                                     self.image_height, 
+                                                     prcppoint).transpose(0,1).to(data_device)
         # self.world_view_transform = None
         # self.full_proj_transform = None
         # self.camera_center = None
@@ -91,7 +102,14 @@ class Camera(nn.Module):
         self.to_cpu()
         
 
+    def update_learning_rate(self):
+        for param_group in self.optimizer.param_groups:
+            if param_group['name'] == "q":
+                param_group['lr'] = 0.002  # 更新 q 的学习率
+            elif param_group['name'] == "T":
+                param_group['lr'] = 0.005  # 更新 T 的学习率
 
+        
     def update(self):
         self.world_view_transform = getWorld2View(self.q, self.T, self.trans, self.scale).transpose(0, 1)
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
@@ -155,7 +173,7 @@ class Camera(nn.Module):
     def get_gtMask(self, with_mask=True):
         if self.mask is None or not with_mask:
             self.mask = torch.ones_like(self.original_image[:1], device="cuda")
-        return self.mask#.to(torch.bool)
+        return self.mask #.to(torch.bool)
 
     def get_gtImage(self, bg, with_mask=True, mask_overwrite=None):
         """# 没有掩码，直接返回原始图像。有掩码，返回掩码图像"""
