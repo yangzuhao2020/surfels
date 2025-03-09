@@ -11,14 +11,14 @@
 
 import os
 import torch
-from random import randint
+# from random import randint
 from utils.loss_utils import *
 from utils.keyframe_selection import *
 from gaussian_renderer import render
 import numpy as np
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+# from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, depth2rgb, normal2rgb, depth2normal, match_depth, normal2curv, resize_image, cross_sample
@@ -28,14 +28,18 @@ from argparse import ArgumentParser, Namespace
 import time
 import os
 from arguments import ModelParams, PipelineParams, OptimizationParams
-from scene.c3vd import C3VD
+from scene.c3vd import C3VDDataset
+from scene.cameras import Camera
 from arguments.configs import *
+from utils.image_utils import energy_mask
+
 
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
 
 def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoint, debug_from,config):
     first_iter = 0
@@ -45,7 +49,8 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
     output_dir, eval_dir = setup_directories(config) # 实验结果输出文件。
     dataset_config = config["data"]
     dataset_config, gradslam_data_cfg = setup_dataset_config(dataset_config)
-    dataset = C3VD(
+    
+    dataset = C3VDDataset(
         config_dict=gradslam_data_cfg,  # 数据集的配置字典
         basedir=dataset_config["basedir"],  # 数据集的基本目录
         sequence=os.path.basename(dataset_config["sequence"]),  # 数据序列的名称
@@ -61,17 +66,15 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
         train_or_test=dataset_config["train_or_test"]  # 选择训练模式或测试模式
     )
     use_mask = args.use_mask
-    scene = Scene(args, gaussians, dataset, opt.camera_lr, shuffle=False)
-    gaussian.initialize_first_timestep()
-    gaussians.training_setup(opt) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
+    scene = Scene(args, gaussians, opt.camera_lr)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
     elif use_mask: # visual hull init
-        gaussians.mask_prune(scene.getTrainCameras(), 4) # 掩码剪枝
+        gaussians.mask_prune(scene.getCameras(), 4) # 掩码剪枝
         None
 
-    opt.densification_interval = max(opt.densification_interval, len(scene.getTrainCameras()))
+    opt.densification_interval = max(opt.densification_interval, len(scene.getCameras()))
     # 调整密度的周期。
     background = torch.tensor([1, 1, 1] if args.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
     background = torch.rand((3), dtype=torch.float32, device="cuda") if args.random_background else background
@@ -93,23 +96,51 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
     gt_w2c_all_frames = []
     actural_keyframe_ids = []
     
+    gt_rgb, gt_depth, k, gt_pose = dataset[0]
+    h = gt_rgb.shape[1] # gt_rgb (C,H,W)
+    w = gt_rgb.shape[2] 
+    fx, fy, cx, cy = k[0][0], k[1][1], k[0][2], k[1][2] # 提取相机内参
+    FoVx = 2 * np.arctan(w / (2 * fx)) 
+    FoVy = 2 * np.arctan(h / (2 * fy))
+    prcppoint = np.array([cx / w, cy / h])
+    
     for time_idx in tqdm(range(checkpoint_time_idx, total_num_frames)):
-        gt_rgb, gt_depth, _, gt_pose = args[time_idx]
+        gt_rgb, gt_depth, intrinsics, gt_pose = dataset[time_idx]
+        gt_w2c = torch.linalg.inv(gt_pose)
+        mask = (gt_depth > 0) & energy_mask(gt_rgb)
+        gaussians.create_pcd(gt_rgb, gt_depth,intrinsics,mask)
+        
+        cam = Camera(
+            colmap_id=time_idx,
+            R=gt_w2c[:3, :3],
+            T=gt_w2c[:3, 3],
+            FoVx=FoVx,
+            FoVy=FoVy,
+            prcppoint=prcppoint,
+            image=gt_rgb,
+            data_device = "cuda",
+            uid=time_idx,
+            camera_lr=1e-4,
+        )
+        cam.mono = depth2normal(gt_depth, mask, cam) # [3, H, W]
+        
+        scene.add_cameras(cam, time_idx)
         iter_start.record()
-        gaussians.update_learning_rate(time_idx) # 传入迭代次数，修改位置参数的学习率。
         gt_rgb = gt_rgb.permute(2, 0, 1) / 255
         gt_depth = gt_depth.permute(2, 0, 1)
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()[:]
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+            viewpoint_stack = scene.getCameras().copy()[:]
+        viewpoint_cam = viewpoint_stack[time_idx]
 
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             tracking = True
-            gaussians.initialize_optimizer(config['tracking']['lrs'], mode="tracking")
+            # gaussians.initialize_optimizer(config['tracking']['lrs'], mode="tracking")
             # Keep Track of Best Candidate Rotation & Translation
-            candidate_cam_unnorm_rot = gaussians._cam_rots[..., time_idx].detach().clone()
-            candidate_cam_tran = gaussians._cam_trans[..., time_idx].detach().clone()
+            gaussians.training_setup(opt, tracking) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
+            gaussians.update_learning_rate(time_idx) # 传入迭代次数，修改位置参数的学习率。
+            candidate_cam_unnorm_rot = viewpoint_cam.q.detach().clone()
+            candidate_cam_tran = viewpoint_cam.T.detach().clone()
             current_min_loss = float(1e20)
             num_iters_tracking_cam = config['tracking']['num_iters'] # 相机优化的次数。
             num_iters_mapping = config['mapping']['num_iters'] # 高斯点的优化，每帧优化的次数。
@@ -134,8 +165,8 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
                 with torch.no_grad():
                     if loss < current_min_loss:
                         current_min_loss = loss
-                        candidate_cam_unnorm_rot = gaussians._cam_rots[..., time_idx].detach().clone()
-                        candidate_cam_tran = gaussians._cam_trans[..., time_idx].detach().clone()
+                        candidate_cam_unnorm_rot = viewpoint_cam.q.detach().clone()
+                        candidate_cam_tran = viewpoint_cam.T.detach().clone()
                     progress_bar.update(1)
                     
                 iter += 1
@@ -149,8 +180,8 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
             progress_bar.close()
             # Copy over the best candidate rotation & translation
             with torch.no_grad():
-                gaussians._cam_rots[..., time_idx] = candidate_cam_unnorm_rot
-                gaussians._cam_trans[..., time_idx] = candidate_cam_tran
+                viewpoint_cam.q = candidate_cam_unnorm_rot # 记录损失最小的旋转矩阵
+                viewpoint_cam.T = candidate_cam_tran # 记录损失最小的平移向量
                 
                 
         # Densification & KeyFrame-based Mapping
@@ -159,8 +190,8 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
             if not config['distance_keyframe_selection']:
                 with torch.no_grad():
                     # 1️⃣ 归一化当前帧的相机旋转
-                    curr_cam_rot = F.normalize(gaussians._cam_rots[..., time_idx].detach())
-                    curr_cam_tran = gaussians._cam_trans[..., time_idx].detach()
+                    curr_cam_rot = F.normalize(viewpoint_cam.q.detach())
+                    curr_cam_tran = viewpoint_cam.T.detach()
                     # 2️⃣ 构造当前帧的世界到相机变换矩阵 (w2c)
                     curr_w2c = torch.eye(4).cuda().float()
                     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
@@ -208,7 +239,7 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, checkpoi
                 else:
                     if len(actural_keyframe_ids) == 0:
                         if len(keyframe_list) > 0:
-                            curr_position = params['cam_trans'][..., time_idx].detach().cpu()
+                            curr_position = viewpoint_cam.T
                             actural_keyframe_ids = keyframe_selection_distance(time_idx, curr_position, keyframe_list, config['distance_current_frame_prob'], num_iters_mapping)
                         else:
                             actural_keyframe_ids = [0] * num_iters_mapping
@@ -343,7 +374,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : scene.getTrainCameras()[::8]})
+                              {'name': 'train', 'cameras' : scene.getCameras()[::8]})
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0

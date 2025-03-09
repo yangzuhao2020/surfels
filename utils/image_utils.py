@@ -112,7 +112,7 @@ def depth2normal(depth, mask, camera):
     # n *= -1
 
     n = (n * mask).permute([2, 0, 1])
-    return n
+    return n # [3, H, W]
 
 def normal2curv(normal, mask):
     # normal = normal.detach()
@@ -436,7 +436,19 @@ def img2video(path, fps=30):
         video.write(cv2.imread(image))
     video.release()
 
+def energy_mask(color: torch.Tensor, th_1=0.1, th_2=0.9):
+    """
+    mask out the background(black). set to 0 to mask black only, and other value(0, 1) to filter pixels with certain brightness
+    """
+    weights = torch.tensor([0.2989, 0.5870, 0.1140], device=color.device).view(3, 1, 1)
+    gray = torch.sum(color * weights, dim=0).detach() # mask should not have grad
+    zero_mask = torch.where((gray >= th_1) & (gray <= th_2), 
+                            torch.tensor([True], device=color.device), 
+                            torch.tensor([False], device=color.device))[None]
+    # Image.fromarray(np.uint8(zero_mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
 
+    # return zero_mask
+    return torch.ones_like(zero_mask).to(zero_mask.device)
 
 
 

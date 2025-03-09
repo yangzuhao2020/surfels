@@ -46,9 +46,9 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 3
-        self._source_path = "data/BMVS/basketball"
-        self._model_path = ""
+        self.sh_degree = 0
+        self._source_path = "data/C3VD/sigmoid_t3_a"
+        self._model_path = "model"
         self._images = "image"
         self._resolution = 1
         self._white_background = False
@@ -78,12 +78,12 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 15_000
-        self.position_lr_init = 0.00016 * 1
-        self.position_lr_final = 0.0000016 * 1
-        self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = self.iterations
-        self.feature_lr = 0.0025 * 1
+        # self.iterations = 15_000
+        self.position_lr_init = 0.0016
+        # self.position_lr_final = 0.000016 * 1
+        # self.position_lr_delay_mult = 0.01
+        # self.position_lr_max_steps = self.iterations
+        self.feature_lr = 0.0025 * 1 
         self.opacity_lr = 0.05 * 1
         self.cutoff_lr = 0.001 * 0
         self.scaling_lr = 0.005 * 1

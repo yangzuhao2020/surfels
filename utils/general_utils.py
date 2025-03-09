@@ -40,9 +40,7 @@ def PILtoTorch(pil_image, resolution):
     else:
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
-def get_expon_lr_func(
-    lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
-):
+def get_expon_lr_func(lr_init):
     """
     Copied from Plenoxels
 
@@ -58,24 +56,44 @@ def get_expon_lr_func(
     :return HoF which takes step as input
     """
 
+    # def helper(step):
+    #     if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+    #         # Disable this parameter
+    #         return 0.0
+    #     if lr_delay_steps > 0:
+    #         # A kind of reverse cosine decay.
+    #         delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+    #             0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1))
+    #         # 得到预热阶段的缩放系数 delay_rate
+    #     else:
+    #         delay_rate = 1.0
+    #     t = np.clip(step / max_steps, 0, 1)
+    #     log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+    #     # 指数插值结果
+    #     return delay_rate * log_lerp
+
+    # return helper
+# 模型训练初期会有一个平滑上升期，之后在进行指数衰减。
+
+    """
+    指数学习率衰减，适用于较短训练周期的优化。
+
+    参数：
+    - lr_init: 初始学习率
+    - lr_final: 训练结束时的最终学习率
+    - lr_delay_steps: 延迟学习率衰减的步数（默认 5% 的训练步数）
+    - lr_delay_mult: 延迟期学习率倍率，控制前期变化幅度
+    - max_steps: 总训练步数
+
+    返回：
+    - helper(step): 计算指定 step 的学习率
+    """
     def helper(step):
-        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
-            # Disable this parameter
-            return 0.0
-        if lr_delay_steps > 0:
-            # A kind of reverse cosine decay.
-            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
-                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1))
-            # 得到预热阶段的缩放系数 delay_rate
-        else:
-            delay_rate = 1.0
-        t = np.clip(step / max_steps, 0, 1)
-        log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
-        # 指数插值结果
-        return delay_rate * log_lerp
+         # 计算指数衰减比例
+        return lr_init * 0.99**step 
 
     return helper
-# 模型训练初期会有一个平滑上升期，之后在进行指数衰减。
+
 
 def strip_lowerdiag(L):
     uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")

@@ -487,13 +487,13 @@ def read_monoData(path):
     
     # return scene_info
 
-sceneLoadTypeCallbacks = {
+# sceneLoadTypeCallbacks = {
     # "Colmap": readColmapSceneInfo,
     # "Blender" : readNerfSyntheticInfo,
     # "IDR": scene_info
-    "train_cameras" : train_cam_infos,
-    "test_cameras" : test_cam_infos,
-}
+#     "train_cameras" : train_cam_infos,
+#     "test_cameras" : test_cam_infos,
+# }
 
 
 # if __name__ == '__main__':

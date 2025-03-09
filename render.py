@@ -89,7 +89,6 @@ def render_set(model_path, use_mask, name, iteration, views, gaussians, pipeline
         poisson_mesh(mesh_path, resampled[:, :3], resampled[:, 3:6], resampled[:, 6:], poisson_depth, 3 * 1e-5)
 
 
-
 def render_sets(dataset : ModelParams, iteration, pipeline : PipelineParams, skip_train : bool, skip_test : bool, write_image: bool, poisson_depth: int):
     with torch.no_grad():
         gaussians = GaussianModel(dataset)
@@ -104,7 +103,7 @@ def render_sets(dataset : ModelParams, iteration, pipeline : PipelineParams, ski
              render_set(dataset.model_path, True, "test", scene.loaded_iter, scene.getTestCameras(scales[0]), gaussians, pipeline, background, write_image, poisson_depth)
 
         if not skip_train:
-             render_set(dataset.model_path, True, "train", scene.loaded_iter, scene.getTrainCameras(scales[0]), gaussians, pipeline, background, write_image, poisson_depth)
+             render_set(dataset.model_path, True, "train", scene.loaded_iter, scene.getCameras(scales[0]), gaussians, pipeline, background, write_image, poisson_depth)
 
 
         # from eval import eval_dtu

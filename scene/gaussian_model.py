@@ -17,13 +17,14 @@ import os
 from torch.utils.cpp_extension import load
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
-from utils.sh_utils import RGB2SH, SH2RGB
+# from utils.sh_utils import RGB2SH, SH2RGB
 from simple_knn._C import distCUDA2
 # from scene.colmap_loader import qvec2rotmat
 from utils.general_utils import quaternion2rotmatrix
-from utils.graphics_utils import BasicPointCloud
+# from utils.graphics_utils import BasicPointCloud
 from utils.image_utils import world2scrn
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+
 
 class GaussianModel:
     def setup_functions(self):
@@ -195,6 +196,7 @@ class GaussianModel:
         # else:
         #     rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         #     rots[:, 0] = 1
+        
         width, height = color.shape[2], color.shape[1]
         CX = intrinsics[0][2]  # 主点 x 坐标
         CY = intrinsics[1][2]  # 主点 y 坐标
@@ -220,7 +222,7 @@ class GaussianModel:
         scales = scale_gs.square().unsqueeze(-1).repeat(1, 3).to("cuda")  # (H * W, 3)
         col = color.transpose(0, 1, 2).reshape(-1, 3).to("cuda")
         
-         # Select points based on mask
+        # Select points based on mask
         if mask is not None:
             mask = mask.reshape(-1).bool().to("cuda")  # 确保 mask 形状正确
             col = col[mask]
@@ -249,7 +251,7 @@ class GaussianModel:
         # exit()
 
 
-    def training_setup(self, training_args):
+    def training_setup(self, training_args, tracking=False):
         # 对模型梯度累积进行初始化、优化器设置以及学习率调度器配置。
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda") # 位置参数的梯度累积。
@@ -258,22 +260,23 @@ class GaussianModel:
         self.opac_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda") # 不透明度参数的梯度累积。
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
+        track = 1
+        if tracking:
+            track = 0
+            
         l = [
-            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"}, # 第0阶球谐矩阵的颜色
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"}, # 除第0阶球谐矩阵的颜色系数。
-            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * track, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr * track, "name": "f_dc"}, # 第0阶球谐矩阵的颜色
+            {'params': [self._features_rest], 'lr': 0.0, "name": "f_rest"}, # 除第0阶球谐矩阵的颜色系数。
+            {'params': [self._opacity], 'lr': training_args.opacity_lr * track, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr * track, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr * track, "name": "rotation"}
         ]
 
         self.config[3] = training_args.camera_lr > 0
         # self.optimizer = torch.optim.SGD(l)
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init * self.spatial_lr_scale,
-                                                    lr_final=training_args.position_lr_final * self.spatial_lr_scale,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init)
         # self.xyz_scheduler_args 这是一个函数，输入训练的实时步数，既可以得到位置的学习率。
 
     def update_learning_rate(self, iteration):
@@ -300,7 +303,6 @@ class GaussianModel:
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
-
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
@@ -322,44 +324,44 @@ class GaussianModel:
     #     n = self.get_normal
     #     c = SH2RGB(self._features_dc)[:, 0]
     #     save_pcl('test/pcl.ply', v, n, c)  
-    def initialize_first_timestep(self, dataset, total_num_frames, scene_radius_depth_ratio):
-        """ 
-        初始化第一帧的 RGB-D 数据、
-        初始化相机参数和变换矩阵，
-        加载更高分辨率的 Densification 数据
-        生成初始 3D 点云
-        初始化神经表示的优化参数
-        估算场景的尺度
-        """
-        # Get RGB-D Data & Camera Parameters
-        gt_rgb, gt_depth, intrinsics, gt_pose = dataset[0]
+    # def initialize_first_timestep(self, dataset, total_num_frames, scene_radius_depth_ratio):
+    #     """ 
+    #     初始化第一帧的 RGB-D 数据、
+    #     初始化相机参数和变换矩阵，
+    #     加载更高分辨率的 Densification 数据
+    #     生成初始 3D 点云
+    #     初始化神经表示的优化参数
+    #     估算场景的尺度
+    #     """
+    #     # Get RGB-D Data & Camera Parameters
+    #     gt_rgb, gt_depth, intrinsics, gt_pose = dataset[0]
 
-        # Process RGB-D Data
-        gt_rgb = gt_rgb.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-        gt_depth = gt_depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+    #     # Process RGB-D Data
+    #     gt_rgb = gt_rgb.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+    #     gt_depth = gt_depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
         
-        # Process Camera Parameters
-        intrinsics = intrinsics[:3, :3] # 得到相机内参
-        gt_w2c = torch.linalg.inv(gt_pose) # 得到相机位姿 (世界坐标系到相机坐标系)
+    #     # Process Camera Parameters
+    #     intrinsics = intrinsics[:3, :3] # 得到相机内参
+    #     gt_w2c = torch.linalg.inv(gt_pose) # 得到相机位姿 (世界坐标系到相机坐标系)
 
-        # Setup Camera 对象
-        w = gt_rgb.shape[2]
-        h = gt_rgb.shape[1]
-        cam = setup_camera(w, h, intrinsics.cpu().numpy(), gt_w2c.detach().cpu().numpy())
+    #     # Setup Camera 对象
+    #     w = gt_rgb.shape[2]
+    #     h = gt_rgb.shape[1]
+    #     cam = setup_camera(w, h, intrinsics.cpu().numpy(), gt_w2c.detach().cpu().numpy())
 
-        # Get Initial Point Cloud (PyTorch CUDA Tensor)
-        mask = (gt_depth > 0) & energy_mask(gt_rgb) # Mask out invalid depth values
-        # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
-        mask = mask.reshape(-1)
-        self.create_pcd(gt_rgb, gt_depth, gt_w2c, intrinsics, mask)
+    #     # Get Initial Point Cloud (PyTorch CUDA Tensor)
+    #     mask = (gt_depth > 0) & energy_mask(gt_rgb) # Mask out invalid depth values
+    #     # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
+    #     mask = mask.reshape(-1)
+    #     self.create_pcd(gt_rgb, gt_depth, gt_w2c, intrinsics, mask)
 
-        # Initialize cams
-        variables = self.initialize_cams(total_num_frames)
+    #     # Initialize cams
+    #     variables = self.initialize_cams(total_num_frames)
 
-        # Initialize an estimate of scene radius for Gaussian-Splatting Densification
-        variables['scene_radius'] = torch.max(gt_depth)/scene_radius_depth_ratio # NOTE: change_here
+    #     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
+    #     variables['scene_radius'] = torch.max(gt_depth)/scene_radius_depth_ratio # NOTE: change_here
 
-        return variables, intrinsics, gt_w2c, cam
+    #     return variables, intrinsics, gt_w2c, cam
 
 
     def replace_tensor_to_optimizer(self, tensor, name):
