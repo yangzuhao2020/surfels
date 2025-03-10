@@ -2,6 +2,8 @@ from scene.c3vd import C3VDDataset
 import os
 from arguments.configs import *
 from arguments.c3vd.c3vd_base import config
+from utils.image_utils import energy_mask
+
 
 dataset_config = config["data"]
 dataset_config, gradslam_data_cfg = setup_dataset_config(dataset_config)
@@ -24,4 +26,7 @@ dataset = C3VDDataset(
 
 gt_rgb, gt_depth, k, gt_pose = dataset[0]
 print("gt_rgb:", gt_rgb.shape, "gt_depth:", gt_depth.shape, "k:", k.shape, "gt_pose:", gt_pose.shape)
-print(gt_pose)
+gt_rgb = gt_rgb.permute(2, 0, 1) / 255
+gt_depth = gt_depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+mask = (gt_depth > 0) & energy_mask(gt_rgb)
+print("mask:", mask.shape)

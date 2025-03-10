@@ -67,8 +67,6 @@ def loadCam(args, id, cam_info, resolution_scale, scene_scale=1.0):
 
 def cameraList_from_camInfos(cameras, resolution_scale, args, time_idx, camlist):
     camlist[resolution_scale].append(loadCam(args, time_idx, cameras, resolution_scale))
-    if time_idx > 0:
-        initialize_camera_pose(camlist[resolution_scale], time_idx)
     return camlist[resolution_scale]
 
 def camera_to_JSON(id, camera : Camera):
@@ -149,7 +147,7 @@ def initialize_camera_pose(camlist, time_idx, forward_prop = True):
             camlist[time_idx].q = camlist[time_idx - 1].q.detach()
             camlist[time_idx].T = camlist[time_idx - 1].T.detach()
             # 直接复制上一帧的位姿。
-    return camlist
+    return camlist[time_idx]
 
 
 def slerp(q0, q1, t, eps=1e-8):

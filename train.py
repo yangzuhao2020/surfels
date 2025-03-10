@@ -25,6 +25,7 @@ from utils.image_utils import psnr, depth2rgb, normal2rgb, depth2normal, match_d
 from utils.general_utils import build_rotation
 from torchvision.utils import save_image
 from argparse import ArgumentParser, Namespace
+from utils.camera_utils import initialize_camera_pose
 import time
 import os
 from arguments import ModelParams, PipelineParams, OptimizationParams
@@ -39,7 +40,13 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
-
+    
+def get_mask(color, depth):
+    color = color.permute(2, 0, 1) / 255
+    depth = depth.permute(2, 0, 1)
+    mask = (depth > 0) & energy_mask(color)
+    return mask, color, depth
+    
 
 def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_from, dataset):
     # first_iter = 0
@@ -74,28 +81,32 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
     gt_w2c_all_frames = []
     actural_keyframe_ids = []
     
-    gt_rgb, gt_depth, k, gt_pose = dataset[0]
-    h = gt_rgb.shape[1] # gt_rgb (C,H,W)
-    w = gt_rgb.shape[2] 
+    gt_rgb_0, gt_depth_0, k, gt_pose_0 = dataset[0]
+    mask, gt_rgb_0, gt_depth_0 = get_mask(gt_rgb_0, gt_depth_0)
+    h = gt_rgb_0.shape[1] # gt_rgb (C,H,W)
+    w = gt_rgb_0.shape[2] 
     fx, fy, cx, cy = k[0][0], k[1][1], k[0][2], k[1][2] # 提取相机内参
     FoVx = 2 * np.arctan(w / (2 * fx)) 
     FoVy = 2 * np.arctan(h / (2 * fy))
     prcppoint = np.array([cx / w, cy / h])
-    num_iters_tracking_cam = config['tracking']['num_iters'] # 相机优化的次数。
+    num_iters_tracking = config['tracking']['num_iters'] # 相机优化的次数。
     num_iters_mapping = config['mapping']['num_iters'] # 高斯点的优化，每帧优化的次数。
+    
+    gaussians.create_pcd(gt_rgb_0, gt_depth_0, k, mask) # 创建点云
     
     
     for time_idx in tqdm(range(checkpoint_time_idx, total_num_frames)):
         gt_rgb, gt_depth, k, gt_pose = dataset[time_idx]
-        gt_w2c = torch.linalg.inv(gt_pose)
-        curr_data = {"image":gt_rgb, "depth":gt_depth, "pose":gt_w2c}
-        mask = (gt_depth > 0) & energy_mask(gt_rgb)
-        gaussians.create_pcd(gt_rgb, gt_depth, k, mask)
+        gt_rgb = gt_rgb.permute(2, 0, 1) / 255
+        gt_depth = gt_depth.permute(2, 0, 1)
+        gt_w2c_0 = torch.linalg.inv(gt_pose_0)
+        curr_data = {"image":gt_rgb, "depth":gt_depth, "pose":gt_pose, "k":k}
+        print("gt_rgb:", gt_rgb.shape, "gt_depth:", gt_depth.shape, "k:", k.shape, "gt_pose:", gt_pose.shape)
         
         cam = Camera(
             colmap_id=time_idx,
-            R=gt_w2c[:3, :3],
-            T=gt_w2c[:3, 3],
+            R=gt_w2c_0[:3, :3],
+            T=gt_w2c_0[:3, 3],
             FoVx=FoVx,
             FoVy=FoVy,
             prcppoint=prcppoint,
@@ -104,28 +115,24 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
             uid=time_idx,
         )
         cam.mono = depth2normal(gt_depth, mask, cam) # [3, H, W]
-        
         scene.add_cameras(cam, time_idx)
-        iter_start.record()
-        gt_rgb = gt_rgb.permute(2, 0, 1) / 255
-        gt_depth = gt_depth.permute(2, 0, 1)
-        
+                
         if not viewpoint_stack:
             viewpoint_stack = scene.getCameras().copy()[:]
         viewpoint_cam:Camera = viewpoint_stack[time_idx]
 
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
+            viewpoint_cam = initialize_camera_pose(viewpoint_stack, time_idx) # 初始化相机位置。
             tracking = True
             # gaussians.initialize_optimizer(config['tracking']['lrs'], mode="tracking")
             # Keep Track of Best Candidate Rotation & Translation
             gaussians.training_setup(opt, tracking) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
             gaussians.update_learning_rate(time_idx,tracking) # 传入迭代次数，修改位置参数的学习率。
-            
             viewpoint_cam.update_learning_rate()
             candidate_cam_unnorm_rot = viewpoint_cam.q.detach().clone()
             candidate_cam_tran = viewpoint_cam.T.detach().clone()
             current_min_loss = float(1e20)
-            progress_bar = tqdm(range(num_iters_tracking_cam), desc=f"Tracking Time Step: {time_idx}")
+            progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
             iter = 0
             do_continue_slam = False
             
@@ -140,7 +147,6 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                                                   gaussians, pool, curr_data,
                                                   mask, tracking=True)
                 loss.backward() # 反向传播。
-                iter_end.record()
                 gaussians.optimizer.step() # 更新参数
                 gaussians.optimizer.zero_grad() # 清空梯度
                 with torch.no_grad():
@@ -151,10 +157,10 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                     progress_bar.update(1)
                     
                 iter += 1
-                tracking_active, iter, num_iters_tracking_cam, do_continue_slam, progress_bar = should_continue_tracking(
-                    iter, num_iters_tracking_cam, 
-                    loss_dict["depth"], config, do_continue_slam,
-                    progress_bar, time_idx)
+                tracking_active, iter, num_iters_tracking, do_continue_slam, progress_bar = should_continue_tracking(
+                                            iter, num_iters_tracking, 
+                                            loss_dict["depth"], config, do_continue_slam,
+                                            progress_bar, time_idx)
 
                 if not tracking_active:
                     break  # 终止 Tracking 过程
@@ -167,7 +173,11 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                 
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
-            variables = gaussians.add_new_gs()
+            tracking = False
+            if time_idx > 0:
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background, patch_size)
+                gaussians.add_new_gaussians(curr_data, render_pkg, viewpoint_cam)
+                
             if not config['distance_keyframe_selection']:
                 with torch.no_grad():
                     # 1️⃣ 归一化当前帧的相机旋转
@@ -307,7 +317,6 @@ def get_loss(render_pkg, viewpoint_cam:Camera,
                                 mask_vis, tracking, 
                                 use_sil_for_loss=True, 
                                 ignore_outlier_depth_loss=True)
-
     # loss_opac
     opac_ = gaussians.get_opacity
     opac_mask0 = torch.gt(opac_, 0.01) * torch.le(opac_, 0.5)

@@ -24,6 +24,7 @@ from utils.general_utils import quaternion2rotmatrix
 # from utils.graphics_utils import BasicPointCloud
 from utils.image_utils import world2scrn
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.image_utils import energy_mask
 
 
 class GaussianModel:
@@ -151,7 +152,7 @@ class GaussianModel:
     #     if self.active_sh_degree < self.max_sh_degree:
     #         self.active_sh_degree += 1
     
-    def create_pcd(self, color, depth, k, w2c, mask=None):
+    def create_pcd(self, color, depth, k, w2c, mask=None, add = True):
         """ color 的形状 (C,H,W) depth (1,H,W) mask (H,W) """   
     # def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         # 从点云中初始化，设置好初始的各个参数情况。设置梯度追踪。
@@ -239,18 +240,36 @@ class GaussianModel:
         # 球谐0阶系数，其值设置为RGB的颜色，其他球谐分量设置为0。
         opacities = inverse_sigmoid(0.1 * torch.ones((pts.shape[0], 1), dtype=torch.float, device="cuda"))
         # 初始化透明度。
+        if add:
+            self._xyz = nn.Parameter(pts.requires_grad_(True))
+            self._features_dc = nn.Parameter(col.requires_grad_(True))
+            # 存储球谐0阶，同时改变维度顺序。(N, 3)
+            self._scaling = nn.Parameter(scales.requires_grad_(True))
+            self._rotation = nn.Parameter(rots.requires_grad_(True))
+            self._opacity = nn.Parameter(opacities.requires_grad_(True))
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+            # 每个点的最大投影半径（2D 视角下），初始化为 0。
+            # exit()
+        else:
+            return pts, col, scales, rots, opacities
 
-        self._xyz = nn.Parameter(pts.requires_grad_(True))
-        self._features_dc = nn.Parameter(col.requires_grad_(True))
-        # 存储球谐0阶，同时改变维度顺序。(N, 3)
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        # 每个点的最大投影半径（2D 视角下），初始化为 0。
-        # exit()
-
-
+    def add_new_gaussians(self, curr_data, render_pkg, viewpoint_cam):
+        # 确定太远的点
+        depth_error = torch.abs(curr_data["gt_depth"] - render_pkg["depth"])* (curr_data["gt_depth"] > 0)
+        non_presence_depth_mask = (render_pkg["depth"] > curr_data["gt_depth"]) * (depth_error > 20 * depth_error.mean())
+        non_presence_depth_mask = non_presence_depth_mask.reshape(-1)
+        
+        if torch.sum(non_presence_depth_mask) > 0:
+            curr_cam_rot = torch.nn.functional.normalize(viewpoint_cam.q.detach())
+            curr_cam_tran = viewpoint_cam.T.detach()
+            curr_w2c = torch.eye(4).cuda().float()
+            curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+            curr_w2c[:3, 3] = curr_cam_tran
+            mask = (curr_data["depth"] > 0) & energy_mask(curr_data["color"])
+            mask = non_presence_depth_mask & mask
+            pts, col, scales, rots, opacities = self.create_pcd(curr_data["color"], curr_data["depth"], curr_data["k"],curr_w2c, mask, add=False)
+            self.densification_postfix(pts, col, scales, rots, opacities)
+        
     def training_setup(self, training_args, tracking=False):
         # 对模型梯度累积进行初始化、优化器设置以及学习率调度器配置。
         self.percent_dense = training_args.percent_dense
@@ -325,46 +344,7 @@ class GaussianModel:
     #     n = self.get_normal
     #     c = SH2RGB(self._features_dc)[:, 0]
     #     save_pcl('test/pcl.ply', v, n, c)  
-    # def initialize_first_timestep(self, dataset, total_num_frames, scene_radius_depth_ratio):
-    #     """ 
-    #     初始化第一帧的 RGB-D 数据、
-    #     初始化相机参数和变换矩阵，
-    #     加载更高分辨率的 Densification 数据
-    #     生成初始 3D 点云
-    #     初始化神经表示的优化参数
-    #     估算场景的尺度
-    #     """
-    #     # Get RGB-D Data & Camera Parameters
-    #     gt_rgb, gt_depth, intrinsics, gt_pose = dataset[0]
-
-    #     # Process RGB-D Data
-    #     gt_rgb = gt_rgb.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-    #     gt_depth = gt_depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
-        
-    #     # Process Camera Parameters
-    #     intrinsics = intrinsics[:3, :3] # 得到相机内参
-    #     gt_w2c = torch.linalg.inv(gt_pose) # 得到相机位姿 (世界坐标系到相机坐标系)
-
-    #     # Setup Camera 对象
-    #     w = gt_rgb.shape[2]
-    #     h = gt_rgb.shape[1]
-    #     cam = setup_camera(w, h, intrinsics.cpu().numpy(), gt_w2c.detach().cpu().numpy())
-
-    #     # Get Initial Point Cloud (PyTorch CUDA Tensor)
-    #     mask = (gt_depth > 0) & energy_mask(gt_rgb) # Mask out invalid depth values
-    #     # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
-    #     mask = mask.reshape(-1)
-    #     self.create_pcd(gt_rgb, gt_depth, gt_w2c, intrinsics, mask)
-
-    #     # Initialize cams
-    #     variables = self.initialize_cams(total_num_frames)
-
-    #     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
-    #     variables['scene_radius'] = torch.max(gt_depth)/scene_radius_depth_ratio # NOTE: change_here
-
-    #     return variables, intrinsics, gt_w2c, cam
-
-
+   
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -404,7 +384,7 @@ class GaussianModel:
 
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
+        # self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -419,18 +399,18 @@ class GaussianModel:
         torch.cuda.empty_cache()
 
     def cat_tensors_to_optimizer(self, tensors_dict):
-        optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
+        optimizable_tensors = {} # 用于存储更新后的参数，并在最后返回。
+        for group in self.optimizer.param_groups: # 遍历优化器中的每个参数组。
             assert len(group["params"]) == 1
-            extension_tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group['params'][0], None)
+            extension_tensor = tensors_dict[group["name"]] # 取出要追加的新张量 
+            stored_state = self.optimizer.state.get(group['params'][0], None) # 得到优化器的状态。
             if stored_state is not None:
 
                 stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
                 stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                del self.optimizer.state[group['params'][0]] # 删除旧状态。
+                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True)) # 拼接新的参数
                 self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
@@ -440,10 +420,11 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+    # def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+    def densification_postfix(self, new_xyz, new_features_dc, new_opacities, new_scaling, new_rotation):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
-        "f_rest": new_features_rest,
+        # "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
@@ -451,7 +432,7 @@ class GaussianModel:
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
+        # self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -484,10 +465,11 @@ class GaussianModel:
             new_scaling[:, -1] = -1e10
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
+        # new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        # self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_opacity, new_scaling, new_rotation)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -503,12 +485,13 @@ class GaussianModel:
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask]
+        # new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        # self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_opacities, new_scaling, new_rotation)
 
     def adaptive_prune(self, min_opacity, extent):
 
