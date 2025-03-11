@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import torch.nn.functional as F
+from utils.general_utils import build_rotation
 
 
 def get_pointcloud(depth, intrinsics, w2c, sampled_indices):
@@ -35,7 +37,7 @@ def get_pointcloud(depth, intrinsics, w2c, sampled_indices):
 
     return pts 
 
-def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixels=1600):
+def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, num_keyframes, pixels=1600):
     """
     Select overlapping keyframes to the current camera observation.
 
@@ -85,14 +87,14 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
 
     # Sort the keyframes based on the percentage of points that are inside the image
     list_keyframe = sorted(
-        list_keyframe, key=lambda i: i['percent_inside'], reverse=True)
+        list_keyframe, key=lambda i: i['percent_inside'], reverse=True) # 按照比例排序
     # Select the keyframes with percentage of points inside the image > 0
     selected_keyframe_list = [keyframe_dict['id']
                                 for keyframe_dict in list_keyframe if keyframe_dict['percent_inside'] > 0.0]
     selected_keyframe_list = list(np.random.permutation(
-        np.array(selected_keyframe_list))[:k])
+        np.array(selected_keyframe_list))[:num_keyframes])
 
-    return selected_keyframe_list
+    return selected_keyframe_list # 1.按照关键帧的可能性进行排序，随机返回关键帧的id
     
     
 def keyframe_selection_distance(time_idx, curr_position, keyframe_list, distance_current_frame_prob, n_samples):
@@ -138,3 +140,39 @@ def keyframe_selection_distance(time_idx, curr_position, keyframe_list, distance
     #     sample_indices.append(len(keyframe_list))
         
     return sample_indices
+
+def should_add_keyframe(time_idx, total_num_frames, config, viewpoint_cam, curr_data, keyframe_list, keyframe_time_indices):
+    """Determine if a keyframe should be added and add it if conditions are met."""
+    # Check timing conditions
+    is_first_frame = time_idx == 0
+    is_keyframe_interval = (time_idx + 1) % config['keyframe_every'] == 0
+    is_second_to_last_frame = time_idx == total_num_frames - 2
+    should_time_trigger = is_first_frame or is_keyframe_interval or is_second_to_last_frame
+    
+    # Check tensor validity
+    last_gt_w2c = curr_data["iter_gt_w2c_list"][-1]
+    is_valid_tensor = not (torch.isinf(last_gt_w2c).any() or torch.isnan(last_gt_w2c).any())
+    
+    # If all conditions are met, add keyframe
+    if should_time_trigger and is_valid_tensor:
+        with torch.no_grad():
+            # Get current estimated rotation & translation
+            curr_cam_rot = F.normalize(viewpoint_cam.q.detach())
+            curr_cam_tran = viewpoint_cam.T.detach()
+            
+            # Build world-to-camera matrix
+            curr_w2c = torch.eye(4).cuda().float()
+            curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+            curr_w2c[:3, 3] = curr_cam_tran
+            
+            # Create and append keyframe
+            curr_keyframe = {
+                'id': time_idx,
+                'est_w2c': curr_w2c,
+                'color': curr_data["image"],
+                'depth': curr_data["depth"],
+            }
+            keyframe_list.append(curr_keyframe)
+            keyframe_time_indices.append(time_idx)
+            
+    return keyframe_list, keyframe_time_indices

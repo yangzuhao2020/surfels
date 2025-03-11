@@ -68,20 +68,21 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
     # background = torch.rand((3), dtype=torch.float32, device="cuda") if args.random_background else background
     patch_size = [float('inf'), float('inf')] # 设置两个无穷大的元素。
     
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
+    # iter_start = torch.cuda.Event(enable_timing = True)
+    # iter_end = torch.cuda.Event(enable_timing = True)
     pool = torch.nn.MaxPool2d(9, stride=1, padding=4)
     # 在不改变特征图尺寸的情况下，提取局部区域的最大值
 
     viewpoint_stack = None # 记录相机视角
-    ema_loss_for_log = 0.0
-
     checkpoint_time_idx = 0
     keyframe_list = []
     gt_w2c_all_frames = []
     actural_keyframe_ids = []
+    keyframe_time_indices = []
+    
     
     gt_rgb_0, gt_depth_0, k, gt_pose_0 = dataset[0]
+    gt_w2c_0 = torch.linalg.inv(gt_pose_0)
     mask, gt_rgb_0, gt_depth_0 = get_mask(gt_rgb_0, gt_depth_0)
     h = gt_rgb_0.shape[1] # gt_rgb (C,H,W)
     w = gt_rgb_0.shape[2] 
@@ -99,9 +100,17 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
         gt_rgb, gt_depth, k, gt_pose = dataset[time_idx]
         gt_rgb = gt_rgb.permute(2, 0, 1) / 255
         gt_depth = gt_depth.permute(2, 0, 1)
-        gt_w2c_0 = torch.linalg.inv(gt_pose_0)
-        curr_data = {"image":gt_rgb, "depth":gt_depth, "pose":gt_pose, "k":k}
-        print("gt_rgb:", gt_rgb.shape, "gt_depth:", gt_depth.shape, "k:", k.shape, "gt_pose:", gt_pose.shape)
+        gt_w2c = torch.linalg.inv(gt_pose)
+        
+        gt_w2c_all_frames.append(gt_w2c)
+        curr_gt_w2c = gt_w2c_all_frames
+        curr_data = {"image":gt_rgb, 
+                     "depth":gt_depth, 
+                     "pose":gt_w2c, 
+                     "k":k,
+                     "id":time_idx,
+                     'iter_gt_w2c_list': curr_gt_w2c}  # 记录所有帧的 gt_w2c（世界到相机的变换）也是所有真实位姿的情况。
+        mask = (curr_data["depth"] > 0) & energy_mask(curr_data["color"])
         
         cam = Camera(
             colmap_id=time_idx,
@@ -126,8 +135,8 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
             tracking = True
             # gaussians.initialize_optimizer(config['tracking']['lrs'], mode="tracking")
             # Keep Track of Best Candidate Rotation & Translation
-            gaussians.training_setup(opt, tracking) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
-            gaussians.update_learning_rate(time_idx,tracking) # 传入迭代次数，修改位置参数的学习率。
+            # gaussians.training_setup(opt, tracking) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
+            # gaussians.update_learning_rate(time_idx,tracking) # 传入迭代次数，修改位置参数的学习率。
             viewpoint_cam.update_learning_rate()
             candidate_cam_unnorm_rot = viewpoint_cam.q.detach().clone()
             candidate_cam_tran = viewpoint_cam.T.detach().clone()
@@ -147,8 +156,10 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                                                   gaussians, pool, curr_data,
                                                   mask, tracking=True)
                 loss.backward() # 反向传播。
-                gaussians.optimizer.step() # 更新参数
-                gaussians.optimizer.zero_grad() # 清空梯度
+                # gaussians.optimizer.step() # 更新参数
+                # gaussians.optimizer.zero_grad() # 清空梯度
+                viewpoint_cam.optimizer.step()
+                viewpoint_cam.optimizer.zero_grad()
                 with torch.no_grad():
                     if loss < current_min_loss:
                         current_min_loss = loss
@@ -169,8 +180,12 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
             with torch.no_grad():
                 viewpoint_cam.q = candidate_cam_unnorm_rot # 记录损失最小的旋转矩阵
                 viewpoint_cam.T = candidate_cam_tran # 记录损失最小的平移向量
-                
-                
+        
+        keyframe_list, keyframe_time_indices = should_add_keyframe(time_idx, total_num_frames,
+                                                                   config, viewpoint_cam, 
+                                                                   curr_data, keyframe_list, 
+                                                                   keyframe_time_indices)
+        
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
             tracking = False
@@ -189,9 +204,9 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                     curr_w2c[:3, 3] = curr_cam_tran
                     # 3️⃣ 选择最相关的关键帧
                     num_keyframes = config['mapping_window_size']-2
-                    selected_keyframes = keyframe_selection_overlap(gt_depth, curr_w2c, curr_cam_rot["intrinsics"], 
-                                                                    keyframe_list[:-1], num_keyframes)
-                    # 4️⃣ 获取关键帧时间索引
+                    selected_keyframes = keyframe_selection_overlap(gt_depth, curr_w2c,
+                                                                    k, keyframe_list[:-1], 
+                                                                    num_keyframes)
                     selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
                     # 5️⃣ 确保最后一个关键帧被选择
                     if len(keyframe_list) > 0:
@@ -203,19 +218,26 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                     selected_keyframes.append(-1)
                     # 7️⃣ 打印最终选择的关键帧
                     print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
-
-            gaussians.update_learning_rate(time_idx) # 传入迭代次数，修改位置参数的学习率。
+                # selected_time_idx 存储的是关键帧的 id 的索引。
+                # selected_keyframes 用于存储 keyframe_list 中关键帧的索引。
+                
+            # gaussians.update_learning_rate(time_idx) # 传入迭代次数，修改位置参数的学习率。
+            gaussians.training_setup(opt) # 对模型参数进行初始化、优化器设置以及学习率调度器配置。
             # mapping
             if num_iters_mapping > 0:
                 progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
-            
+                
+            actural_keyframe_ids = []
+            prune_dict = config['mapping']['pruning_dict']
+            densify_dict = config['mapping']['densify_dict']
             for iter in range(num_iters_mapping):
-                iter_start_time = time.time()
+                gaussians.update_learning_rate(iter) # 传入迭代次数，修改位置参数的学习率。
                 if not config['distance_keyframe_selection']:
                     # Randomly select a frame until current time step amongst keyframes
                     rand_idx = np.random.randint(0, len(selected_keyframes))
                     selected_rand_keyframe_idx = selected_keyframes[rand_idx]
                     actural_keyframe_ids.append(selected_rand_keyframe_idx)
+                    # 记录每次迭代所选择的关键帧索引，以便后续分析哪些关键帧被用到了。
                     if selected_rand_keyframe_idx == -1:
                         # Use Current Frame Data
                         iter_time_idx = time_idx
@@ -248,53 +270,55 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                         iter_time_idx = keyframe_list[selected_keyframe_ids]['id']
                         iter_color = keyframe_list[selected_keyframe_ids]['color']
                         iter_depth = keyframe_list[selected_keyframe_ids]['depth']
-            if (time_idx - 1) == debug_from:
-                    pipe.debug = True
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, patch_size)
-            render_image, render_normal, render_depth, render_opac, viewspace_point_tensor, visibility_filter, radii = \
-            render_pkg["render"], render_pkg["normal"], render_pkg["depth"], render_pkg["opac"], \
-            render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            loss,loss_dict,mask_vis= get_loss(render_pkg,viewpoint_cam, 
-                                              gaussians, pool, curr_data,
-                                              mask, tracking=False)
-            loss.backward() # 反向传播。
-            
-            with torch.no_grad():
-                if (time_idx in saving_iterations):
-                    print("\n[ITER {}] Saving Gaussians".format(time_idx))
-                    scene.save(time_idx)
+                # iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+                iter_data = {'cam': cam, 
+                             'im': iter_color, 
+                             'depth': iter_depth, 
+                             'id': iter_time_idx, 
+                             'intrinsics': k}
 
-                # Densification
-                if time_idx > opt.densify_from_iter:
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background, patch_size)
+                render_image, render_normal, render_depth, render_opac, viewspace_point_tensor, visibility_filter, radii = \
+                render_pkg["render"], render_pkg["normal"], render_pkg["depth"], render_pkg["opac"], \
+                render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                loss,loss_dict,mask_vis= get_loss(render_pkg, viewpoint_cam, 
+                                                    gaussians, pool, 
+                                                    iter_data, mask, tracking)
+                loss.backward() # 反向传播。
+            
+                with torch.no_grad():
+                    # Densification
+                    # if iter > opt.densify_from_iter:
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(
                         gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     # 记录最大的投影半径。
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
                     min_opac = 0.1
-                    if time_idx % opt.densification_interval == 0:
+                    if (iter >= prune_dict['start_after']) and (iter % prune_dict['prune_every'] == 0):
                         gaussians.adaptive_prune(min_opac, scene.cameras_extent)
+                    if (iter >= densify_dict['start_after']) and (iter % densify_dict['densify_every']) == 0:
                         gaussians.adaptive_densify(opt.densify_grad_threshold, # 密度增强的梯度阈值。 这里可能会对误差大的地方加点。
-                                                scene.cameras_extent) 
+                                                    scene.cameras_extent) 
                     
-                if (time_idx - 1) % 1000 == 0:
-                    normal_wrt = normal2rgb(render_normal, mask_vis)
-                    depth_wrt = depth2rgb(render_depth, mask_vis)
-                    img_wrt = torch.cat([curr_data["image"], render_image, normal_wrt * render_opac, depth_wrt * render_opac], 2)
-                    # 图片拼接
-                    save_image(img_wrt.cpu(), f'test/test.png')
-                
-                if time_idx < opt.iterations:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad()
-                    # viewpoint_cam.optimizer.step()
-                    # viewpoint_cam.optimizer.zero_grad()
+                    if time_idx < opt.iterations:
+                        gaussians.optimizer.step()
+                        gaussians.optimizer.zero_grad()
 
-                if (time_idx in checkpoint_iterations):
-                    # gaussians.adaptive_prune(min_opac, scene.cameras_extent)
-                    print("\n[ITER {}] Saving Checkpoint".format(time_idx))
-                    torch.save((gaussians.capture(), time_idx), scene.model_path + "/chkpnt" + str(time_idx) + ".pth")
-
+        with torch.no_grad():
+            if (time_idx - 1) % 1 == 0:
+                normal_wrt = normal2rgb(render_normal, mask_vis)
+                depth_wrt = depth2rgb(render_depth, mask_vis)
+                img_wrt = torch.cat([curr_data["image"], render_image, normal_wrt * render_opac, depth_wrt * render_opac], 2)
+                # 图片拼接
+                save_image(img_wrt.cpu(), f'test/test.png')            
+        
+    with torch.no_grad():
+        print("\n[ITER {}] Saving Gaussians".format(total_num_frames))
+        scene.save(time_idx)
+        print("\n[ITER {}] Saving Checkpoint".format(time_idx))
+        torch.save((gaussians.capture(), time_idx), scene.model_path + "/chkpnt" + str(time_idx) + ".pth")
+    
 def get_loss(render_pkg, viewpoint_cam:Camera,
              gaussians, pool, curr_data,
              mask, tracking,use_mask=True):
@@ -343,7 +367,6 @@ def prepare_output_and_logger(args):
 
         args.model_path = os.path.join("./output", f"{args.source_path.split('/')[-1]}_{unique_str[0:10]}")
         
-        
     # Set up output folder 写下 args 的所有参数。
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
@@ -358,42 +381,42 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, pipe, bg, use_mask):
-    if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
+# def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, pipe, bg, use_mask):
+#     if tb_writer:
+#         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+#         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+#         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
-    # Report test and samples of training set
-    if iteration in testing_iterations:
-        torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : scene.getCameras()[::8]})
-        for config in validation_configs:
-            if config['cameras'] and len(config['cameras']) > 0:
-                l1_test = 0.0
-                psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
-                    image = torch.clamp(render(viewpoint, scene.gaussians, pipe, bg, [float('inf'), float('inf')])["render"], 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.get_gtImage(bg, with_mask=use_mask), 0.0, 1.0)
-                    if tb_writer and (idx < 5):
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
-                        if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
+#     # Report test and samples of training set
+#     if iteration in testing_iterations:
+#         torch.cuda.empty_cache()
+#         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+#                               {'name': 'train', 'cameras' : scene.getCameras()[::8]})
+#         for config in validation_configs:
+#             if config['cameras'] and len(config['cameras']) > 0:
+#                 l1_test = 0.0
+#                 psnr_test = 0.0
+#                 for idx, viewpoint in enumerate(config['cameras']):
+#                     image = torch.clamp(render(viewpoint, scene.gaussians, pipe, bg, [float('inf'), float('inf')])["render"], 0.0, 1.0)
+#                     gt_image = torch.clamp(viewpoint.get_gtImage(bg, with_mask=use_mask), 0.0, 1.0)
+#                     if tb_writer and (idx < 5):
+#                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+#                         if iteration == testing_iterations[0]:
+#                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+#                     l1_test += l1_loss(image, gt_image).mean().double()
+#                     psnr_test += psnr(image, gt_image).mean().double()
 
-                psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
-                if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+#                 psnr_test /= len(config['cameras'])
+#                 l1_test /= len(config['cameras'])          
+#                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+#                 if tb_writer:
+#                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+#                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
-        if tb_writer:
-            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-        torch.cuda.empty_cache()
+#         if tb_writer:
+#             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+#             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+#         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser

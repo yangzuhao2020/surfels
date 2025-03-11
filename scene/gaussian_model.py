@@ -253,7 +253,7 @@ class GaussianModel:
         else:
             return pts, col, scales, rots, opacities
 
-    def add_new_gaussians(self, curr_data, render_pkg, viewpoint_cam):
+    def add_new_gaussians(self, curr_data, render_pkg, viewpoint_cam, mask):
         # 确定太远的点
         depth_error = torch.abs(curr_data["gt_depth"] - render_pkg["depth"])* (curr_data["gt_depth"] > 0)
         non_presence_depth_mask = (render_pkg["depth"] > curr_data["gt_depth"]) * (depth_error > 20 * depth_error.mean())
@@ -265,12 +265,17 @@ class GaussianModel:
             curr_w2c = torch.eye(4).cuda().float()
             curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
             curr_w2c[:3, 3] = curr_cam_tran
-            mask = (curr_data["depth"] > 0) & energy_mask(curr_data["color"])
-            mask = non_presence_depth_mask & mask
-            pts, col, scales, rots, opacities = self.create_pcd(curr_data["color"], curr_data["depth"], curr_data["k"],curr_w2c, mask, add=False)
+            # mask = (curr_data["depth"] > 0) & energy_mask(curr_data["color"])
+            add_new_mask = non_presence_depth_mask & mask
+            pts, col, scales, rots, opacities = self.create_pcd(curr_data["color"], 
+                                                                curr_data["depth"], 
+                                                                curr_data["k"], 
+                                                                curr_w2c, 
+                                                                add_new_mask, 
+                                                                add=False)
             self.densification_postfix(pts, col, scales, rots, opacities)
         
-    def training_setup(self, training_args, tracking=False):
+    def training_setup(self, training_args):
         # 对模型梯度累积进行初始化、优化器设置以及学习率调度器配置。
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda") # 位置参数的梯度累积。
@@ -278,18 +283,14 @@ class GaussianModel:
         self.rot_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda") # 旋转参数的梯度累积。
         self.opac_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda") # 不透明度参数的梯度累积。
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-
-        track = 1
-        if tracking:
-            track = 0
             
         l = [
-            {'params': [self._xyz], 'lr': training_args.position_lr_init * track, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr * track, "name": "f_dc"}, # 第0阶球谐矩阵的颜色
+            {'params': [self._xyz], 'lr': training_args.position_lr_init, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"}, # 第0阶球谐矩阵的颜色
             {'params': [self._features_rest], 'lr': 0.0, "name": "f_rest"}, # 除第0阶球谐矩阵的颜色系数。
-            {'params': [self._opacity], 'lr': training_args.opacity_lr * track, "name": "opacity"},
-            {'params': [self._scaling], 'lr': training_args.scaling_lr * track, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr * track, "name": "rotation"}
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
 
         self.config[3] = training_args.camera_lr > 0
@@ -298,13 +299,11 @@ class GaussianModel:
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init)
         # self.xyz_scheduler_args 这是一个函数，输入训练的实时步数，既可以得到位置的学习率。
 
-    def update_learning_rate(self, iteration, tracking = False):
+    def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
-                lr = self.xyz_scheduler_args(iteration)
-                if tracking:
-                    param_group['lr'] = 0
+                lr = self.xyz_scheduler_args(iteration + 1)
                 param_group['lr'] = lr 
 
     def construct_list_of_attributes(self):
