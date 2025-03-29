@@ -170,9 +170,9 @@ def safe_state(silent):
 def normal2rotation(n):
     # construct a random rotation matrix from normal
     # it would better be positive definite and orthogonal
-    n = torch.nn.functional.normalize(n)
+    # n = torch.nn.functional.normalize(n)
     # w0 = torch.rand_like(n)
-    w0 = torch.tensor([[1, 0, 0]]).expand(n.shape)
+    w0 = torch.tensor([[1, 0, 0]], device="cuda").expand(n.shape)
     R0 = w0 - torch.sum(w0 * n, -1, True) * n
     R0 *= torch.sign(R0[:, :1])
     R0 = torch.nn.functional.normalize(R0)
@@ -196,7 +196,7 @@ def normal2rotation(n):
 # 将法向量旋转到特定方向的矩阵。
 
 
-def compute_normals_cross_product(self, pts, width, height):
+def compute_normals_cross_product(pts, width, height):
     """ 通过 3D 叉乘计算法线 同时归一化"""
     pts = pts.view(height, width, 3)  # 变成图像形状 (H, W, 3)
 
@@ -237,7 +237,7 @@ def rotmatrix2quaternion(R, normalize=False):
     ], -1)
     if normalize:
         q = torch.nn.functional.normalize(q, dim=-1)
-    return q
+    return q.unsqueeze(0)
 
 
 def knn_pcl(pcl0, pcl1, feat, K):

@@ -32,7 +32,7 @@ group_name = "C3VD_base"
 run_name = scene_name
 
 config = dict(
-    workdir=f"./experiments/{group_name}",
+    workdir=f"./output/{group_name}",
     run_name=run_name,
     seed=seed,
     primary_device=primary_device,

@@ -112,16 +112,17 @@ def keyframe_selection_distance(time_idx, curr_position, keyframe_list, distance
     """
     distances = []
     time_laps = []
-    curr_shift = np.linalg.norm(curr_position)
+    curr_shift = torch.norm(curr_position)
     for keyframe in keyframe_list:
         est_w2c = keyframe['est_w2c'].detach().cpu()
         camera_position = est_w2c[:3, 3]
-        distance = np.linalg.norm(camera_position - curr_position)
+        distance = torch.norm(camera_position - curr_position)
         time_lap = time_idx - keyframe['id']
         distances.append(distance)
         time_laps.append(time_lap)
 
-    dis2prob = lambda x, scaler: np.log2(1 + scaler/(x+scaler/5))
+    # dis2prob = lambda x, scaler: torch.log2(1 + scaler/(x+scaler/5))
+    dis2prob = lambda x, scaler: np.log2(1 + scaler / (x + scaler / 5 + 1e-6))
     dis_prob = [dis2prob(d, curr_shift)+dis2prob(t, time_idx) for d, t in zip(distances, time_laps)]
     sum_prob = sum(dis_prob) / (1-distance_current_frame_prob) # distance_current_frame_prob： p_c
     norm_dis_prob = [p/sum_prob for p in dis_prob]
@@ -157,6 +158,7 @@ def should_add_keyframe(time_idx, total_num_frames, config, viewpoint_cam, curr_
     if should_time_trigger and is_valid_tensor:
         with torch.no_grad():
             # Get current estimated rotation & translation
+            # print(viewpoint_cam.q.shape)
             curr_cam_rot = F.normalize(viewpoint_cam.q.detach())
             curr_cam_tran = viewpoint_cam.T.detach()
             

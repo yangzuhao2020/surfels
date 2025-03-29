@@ -25,8 +25,9 @@ dataset = C3VDDataset(
     )
 
 gt_rgb, gt_depth, k, gt_pose = dataset[0]
-print("gt_rgb:", gt_rgb.shape, "gt_depth:", gt_depth.shape, "k:", k.shape, "gt_pose:", gt_pose.shape)
+print("gt_rgb:", gt_rgb.device, "gt_depth:", gt_depth.device, "k:", k.device, "gt_pose:", gt_pose.device)
 gt_rgb = gt_rgb.permute(2, 0, 1) / 255
 gt_depth = gt_depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
 mask = (gt_depth > 0) & energy_mask(gt_rgb)
-print("mask:", mask.shape)
+# print("mask:", mask.device)
+# print(gt_rgb.device)

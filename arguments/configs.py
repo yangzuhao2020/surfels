@@ -16,13 +16,13 @@ def setup_config_defaults(config):
     # 关键帧选择
     config.setdefault("distance_keyframe_selection", False)
     if config["distance_keyframe_selection"]:
-        print("Using CDF Keyframe Selection. Note that 'mapping window size' is useless.")
+        # print("Using CDF Keyframe Selection. Note that 'mapping window size' is useless.")
         config.setdefault("distance_current_frame_prob", 0.5)
 
     # 高斯简化
     config.setdefault("gaussian_simplification", True)
-    if not config["gaussian_simplification"]:
-        print("Using Full Gaussian Representation, which may cause unstable optimization if not fully optimized.")
+    # if not config["gaussian_simplification"]:
+        # print("Using Full Gaussian Representation, which may cause unstable optimization if not fully optimized.")
 
     return config
 

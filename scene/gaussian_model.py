@@ -220,8 +220,8 @@ class GaussianModel:
         pts = (c2w @ pts4.T).T[:, :3].to("cuda")  # 从相机坐标变换到世界坐标 (H * W, 3)
 
         scale_gs = depth_z / ((FX + FY)/2)
-        scales = scale_gs.square().unsqueeze(-1).repeat(1, 3).to("cuda")  # (H * W, 3)
-        col = color.transpose(0, 1, 2).reshape(-1, 3).to("cuda")
+        scales = scale_gs.square().unsqueeze(-1).repeat(1, 3)#.to("cuda")  # (H * W, 3)
+        col = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) 
         
         # Select points based on mask
         if mask is not None:
@@ -231,7 +231,7 @@ class GaussianModel:
             scales = scales[mask]
             
         normals = compute_normals_cross_product(pts, width, height)
-        rots = normal2rotation(torch.from_numpy(normals).to(torch.float32)).to("cuda")
+        rots = normal2rotation(normals)
         scales[..., -1] -= 1e10 # squeeze z scaling
         # features = torch.zeros((pts.shape[0], 3)).float().cuda()
         # features 张量大小 (n,3,(max_sh_degree + 1)^2) 3表示RGB 用于颜色表示。
@@ -293,7 +293,7 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
 
-        self.config[3] = training_args.camera_lr > 0
+        # self.config[3] = training_args.camera_lr > 0
         # self.optimizer = torch.optim.SGD(l)
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init)

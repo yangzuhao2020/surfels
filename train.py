@@ -48,7 +48,8 @@ def get_mask(color, depth):
     return mask, color, depth
     
 
-def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_from, dataset):
+def training(args, opt, pipe, debug_from, dataset):
+# def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_from, dataset):
     # first_iter = 0
     # tb_writer = prepare_output_and_logger(args)
     gaussians = GaussianModel(args)
@@ -82,6 +83,7 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
     
     
     gt_rgb_0, gt_depth_0, k, gt_pose_0 = dataset[0]
+    k = k.cpu()
     gt_w2c_0 = torch.linalg.inv(gt_pose_0)
     mask, gt_rgb_0, gt_depth_0 = get_mask(gt_rgb_0, gt_depth_0)
     h = gt_rgb_0.shape[1] # gt_rgb (C,H,W)
@@ -93,7 +95,7 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
     num_iters_tracking = config['tracking']['num_iters'] # 相机优化的次数。
     num_iters_mapping = config['mapping']['num_iters'] # 高斯点的优化，每帧优化的次数。
     
-    gaussians.create_pcd(gt_rgb_0, gt_depth_0, k, mask) # 创建点云
+    gaussians.create_pcd(gt_rgb_0, gt_depth_0, k, gt_w2c_0, mask) # 创建点云
     
     
     for time_idx in tqdm(range(checkpoint_time_idx, total_num_frames)):
@@ -110,7 +112,7 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                      "k":k,
                      "id":time_idx,
                      'iter_gt_w2c_list': curr_gt_w2c}  # 记录所有帧的 gt_w2c（世界到相机的变换）也是所有真实位姿的情况。
-        mask = (curr_data["depth"] > 0) & energy_mask(curr_data["color"])
+        mask = (curr_data["depth"] > 0) & energy_mask(curr_data["image"])
         
         cam = Camera(
             colmap_id=time_idx,
@@ -161,7 +163,7 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                 viewpoint_cam.optimizer.step()
                 viewpoint_cam.optimizer.zero_grad()
                 with torch.no_grad():
-                    if loss < current_min_loss:
+                    if loss < current_min_loss: 
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = viewpoint_cam.q.detach().clone()
                         candidate_cam_tran = viewpoint_cam.T.detach().clone()
@@ -301,9 +303,9 @@ def training(args, opt, pipe, saving_iterations, checkpoint_iterations, debug_fr
                         gaussians.adaptive_densify(opt.densify_grad_threshold, # 密度增强的梯度阈值。 这里可能会对误差大的地方加点。
                                                     scene.cameras_extent) 
                     
-                    if time_idx < opt.iterations:
-                        gaussians.optimizer.step()
-                        gaussians.optimizer.zero_grad()
+                    # if time_idx < opt.iterations:
+                    gaussians.optimizer.step()
+                    gaussians.optimizer.zero_grad()
 
         with torch.no_grad():
             if (time_idx - 1) % 1 == 0:
@@ -448,24 +450,25 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000, 10_000, 15_000, 20_000, 25_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 15_000, 30_000])
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
+    # parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000, 10_000, 15_000, 20_000, 25_000, 30_000])
+    # parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 15_000, 30_000])
+    # parser.add_argument("--quiet", action="store_true")
+    # parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    # parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
-    print("Optimizing " + args.model_path)
+    # args.save_iterations.append(args.iterations)
+    # print("Optimizing " + args.model_path)
     
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
        # 打印 lp.extract(args) 结果
     lp_params = lp.extract(args)
-    print("lp.extract(args): ", lp_params.__dict__)  # 打印对象内部所有属性和值
+    # print("lp.extract(args): ", lp_params.__dict__)  # 打印对象内部所有属性和值
     
-    training(lp.extract(args), op.extract(args), 
-             pp.extract(args), args.save_iterations, 
-             args.checkpoint_iterations, args.debug_from,
-             dataset)
-
+    # training(lp.extract(args), op.extract(args), 
+    #          pp.extract(args), args.save_iterations, 
+    #          args.checkpoint_iterations, args.debug_from,
+    #          dataset)
+    training(lp_params, op.extract(args), pp.extract(args), args.debug_from, dataset)
     # All done
     print("\nTraining complete.")
+    

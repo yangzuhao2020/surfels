@@ -18,55 +18,56 @@ from utils.image_utils import resize_image
 import torch.nn.functional as F
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, scene_scale=1.0):
-    orig_w, orig_h = cam_info.image.size
-    if args.resolution == 1:
-        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
-    else:  # should be a type that converts to float
-        if args.resolution == -1:
-            if orig_w > 1600:
-                global WARNED
-                if not WARNED:
-                    print("[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
-                        "If this is not desired, please explicitly specify '--resolution/-r' as 1")
-                    WARNED = True
-                global_down = orig_w / 1600
-            else:
-                global_down = 1
-        else:
-            global_down = orig_w / args.resolution
+# def loadCam(args, id, cam_info, resolution_scale, scene_scale=1.0):
+    # orig_w, orig_h = cam_info.original_image.size
+    # if args.resolution == 1:
+    # resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    # else:  # should be a type that converts to float
+    #     if args.resolution == -1:
+    #         if orig_w > 1600:
+    #             global WARNED
+    #             if not WARNED:
+    #                 print("[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
+    #                     "If this is not desired, please explicitly specify '--resolution/-r' as 1")
+    #                 WARNED = True
+    #             global_down = orig_w / 1600
+    #         else:
+    #             global_down = 1
+    #     else:
+    #         global_down = orig_w / args.resolution
 
-        scale = float(global_down) * float(resolution_scale)
-        resolution = (int(orig_w / scale), int(orig_h / scale))
+    #     scale = float(global_down) * float(resolution_scale)
+    #     resolution = (int(orig_w / scale), int(orig_h / scale))
 
-    resized_image_rgb = PILtoTorch(cam_info.image, resolution)
-    resized_mask = resize_image(cam_info.mask, [resolution[1], resolution[0]])
-    resized_mono = None if cam_info.mono is None else resize_image(cam_info.mono, [resolution[1], resolution[0]])
+    # resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    # resized_mask = resize_image(cam_info.mask, [resolution[1], resolution[0]])
+    # resized_mono = None if cam_info.mono is None else resize_image(cam_info.mono, [resolution[1], resolution[0]])
 
-    gt_image = resized_image_rgb[:3, ...]
-    loaded_mask = None
+    # gt_image = resized_image_rgb[:3, ...]
+    # loaded_mask = None
 
-    if resized_image_rgb.shape[1] == 4:
-        loaded_mask = resized_image_rgb[3:4, ...]
+    # if resized_image_rgb.shape[1] == 4:
+    #     loaded_mask = resized_image_rgb[3:4, ...]
     
-    return Camera(colmap_id=cam_info.uid,
-                  R=cam_info.R, 
-                  T=cam_info.T, 
-                  FoVx=cam_info.FovX,
-                  FoVy=cam_info.FovY, 
-                  prcppoint=cam_info.prcppoint,
-                  image=gt_image, 
-                  gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, 
-                  uid=id, 
-                  data_device=args.data_device,
-                  mask=resized_mask, 
-                  mono=resized_mono, 
-                  scene_scale=scene_scale)
+    # return Camera(colmap_id=cam_info.uid,
+    #               R=cam_info.R, 
+    #               T=cam_info.T, 
+    #               FoVx=cam_info.FovX,
+    #               FoVy=cam_info.FovY, 
+    #               prcppoint=cam_info.prcppoint,
+    #             #   image=gt_image, 
+    #             #   gt_alpha_mask=loaded_mask,
+    #               image_name=cam_info.image_name, 
+    #               uid=id, 
+    #               data_device=args.data_device,
+    #             #   mask=resized_mask, 
+    #             #   mono=resized_mono, 
+    #               scene_scale=scene_scale)
     
 
-def cameraList_from_camInfos(cameras, resolution_scale, args, time_idx, camlist):
-    camlist[resolution_scale].append(loadCam(args, time_idx, cameras, resolution_scale))
+def cameraList_from_camInfos(cameras, resolution_scale, camlist):
+    # camlist[resolution_scale].append(loadCam(args, time_idx, cameras, resolution_scale))
+    camlist[resolution_scale].append(cameras)
     return camlist[resolution_scale]
 
 def camera_to_JSON(id, camera : Camera):

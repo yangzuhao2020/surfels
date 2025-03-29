@@ -32,9 +32,9 @@ class Camera(nn.Module):
 
         self.uid = uid
         self.colmap_id = colmap_id
-        self.R = torch.from_numpy(R)
+        self.R = R
         self.q = rotmatrix2quaternion(self.R[None], True)[0]
-        self.T = torch.from_numpy(T)
+        self.T = T
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name

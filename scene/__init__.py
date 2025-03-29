@@ -63,7 +63,7 @@ class Scene:
         #         json.dump(json_cams, file)
         
         self.camlist = {}
-        
+        self.camlist[1.0] = []
         # if shuffle:
         #     random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
         #     random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
@@ -84,8 +84,8 @@ class Scene:
     def add_cameras(self, cameras, time_idx, resolution_scale=1.0):
         self.camlist[resolution_scale] = cameraList_from_camInfos(cameras, 
                                                                   resolution_scale,
-                                                                  self.args, 
-                                                                  time_idx, 
+                                                                #   self.args, 
+                                                                #   time_idx, 
                                                                   self.camlist)
         
     def save(self, iteration):
